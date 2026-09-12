@@ -1,0 +1,70 @@
+# Configuration principale du bot de trading.
+# Modifie ce fichier pour changer les symboles suivis, les stratégies actives
+# et les paramètres de gestion du risque, sans toucher au code.
+
+universe:
+  # Actions / ETF suivis par le bot
+  symbols:
+    - SPY
+    - QQQ
+    - AAPL
+    - MSFT
+    - NVDA
+
+  # Granularité des bougies utilisées par les stratégies
+  timeframe: "1Day"
+
+# Stratégies actives et leur poids relatif dans l'allocation de capital.
+# La somme des poids n'a pas besoin de faire 1 : ils sont normalisés automatiquement.
+strategies:
+  - name: sma_crossover
+    enabled: true
+    weight: 1.0
+    params:
+      fast_window: 20
+      slow_window: 50
+
+  - name: rsi_mean_reversion
+    enabled: true
+    weight: 1.0
+    params:
+      rsi_window: 14
+      oversold: 30
+      overbought: 70
+
+  - name: momentum_breakout
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 55
+      exit_window: 20
+
+# Gestion du risque et du portefeuille
+risk:
+  # Autoriser les positions courtes (short). false = long-only, recommandé pour débuter.
+  allow_short: false
+  # Capital max engagé au total (en % de l'equity du compte)
+  max_gross_exposure_pct: 0.90
+  # Poids max d'une seule position (en % de l'equity)
+  max_position_weight_pct: 0.25
+  # Risque max par trade (en % de l'equity), utilisé pour dimensionner via l'ATR
+  risk_per_trade_pct: 0.01
+  # Multiple d'ATR utilisé comme distance de stop-loss
+  atr_stop_multiple: 2.5
+  atr_window: 14
+  # Nombre max de positions simultanées, toutes stratégies confondues
+  max_open_positions: 8
+
+# Paramètres du backtest
+backtest:
+  start_date: "2018-01-01"
+  end_date: null # null = aujourd'hui
+  initial_cash: 100000
+  commission_pct: 0.0005 # 5 bps par trade, approximation de frais + slippage
+
+# Paramètres du moteur live (paper trading)
+live:
+  # Intervalle entre deux cycles de décision (en secondes). 3600 = toutes les heures.
+  loop_interval_seconds: 3600
+  # Ne trader que lorsque le marché US est ouvert (utilise l'horloge Alpaca)
+  trade_only_when_market_open: true

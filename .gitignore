@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+*.env.local
+
+# Data / outputs
+data/cache/
+*.csv
+!config/*.csv
+logs/
+*.log
+backtests/results/
