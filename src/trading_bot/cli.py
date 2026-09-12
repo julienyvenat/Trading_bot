@@ -36,6 +36,14 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
     print("\n=== Résultats du backtest ===")
     print(result.metrics.summary())
+    print(f"Sorties sur stop suiveur : {result.num_stop_exits}")
+    if result.final_risk_state and result.final_risk_state.drawdown_halted:
+        print(
+            "⚠️  Coupe-circuit de DRAWDOWN déclenché à un moment du backtest "
+            "(position soldée, plus aucune entrée après ce point)."
+        )
+    if result.final_risk_state and result.final_risk_state.daily_halted:
+        print("⚠️  Coupe-circuit de perte JOURNALIÈRE actif sur la dernière séance simulée.")
 
     if args.output:
         result.equity_curve.to_csv(args.output, header=["equity"])
@@ -45,6 +53,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 def cmd_paper(args: argparse.Namespace) -> None:
     from trading_bot.execution.alpaca_broker import AlpacaBroker
     from trading_bot.live.engine import run_forever, run_once
+    from trading_bot.state import load_state, save_state
 
     setup_logging()
     config = load_config(args.config)
@@ -53,7 +62,9 @@ def cmd_paper(args: argparse.Namespace) -> None:
         from trading_bot.config import load_alpaca_credentials
 
         broker = AlpacaBroker(load_alpaca_credentials())
-        run_once(config, broker, dry_run=args.dry_run)
+        state = load_state(config.live.state_file)
+        state = run_once(config, broker, dry_run=args.dry_run, state=state)
+        save_state(config.live.state_file, state)
     else:
         run_forever(config, dry_run=args.dry_run)
 

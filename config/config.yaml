@@ -55,6 +55,30 @@ risk:
   # Nombre max de positions simultanées, toutes stratégies confondues
   max_open_positions: 8
 
+  # --- Coupe-circuits (kill switches) ---
+  # Perte journalière max (% de l'equity en début de séance) avant de bloquer
+  # toute NOUVELLE entrée pour le reste de la séance. Les positions déjà
+  # ouvertes restent gérées normalement (stop suiveur toujours actif).
+  # Se réinitialise automatiquement au début de chaque nouvelle séance.
+  max_daily_loss_pct: 0.03
+  # Drawdown max depuis le plus haut historique de l'equity avant de tout
+  # liquider et d'arrêter complètement le trading (nouvelles entrées ET
+  # positions existantes). Contrairement au coupe-circuit journalier, celui-ci
+  # NE SE RÉINITIALISE PAS automatiquement : une fois déclenché, il faut
+  # intervenir manuellement (voir README) avant que le bot ne retrade.
+  max_drawdown_pct: 0.20
+
+# Paramètres du calendrier de marché
+market:
+  # Calendrier boursier utilisé (jours fériés, horaires, fermetures anticipées).
+  # Voir https://github.com/rsheftel/pandas_market_calendars pour la liste des
+  # calendriers disponibles (NYSE couvre la quasi-totalité des actions/ETF US).
+  calendar: "NYSE"
+  # Ne pas ouvrir de NOUVELLE position dans les N dernières minutes avant la
+  # clôture (évite l'auction de clôture et le slippage de fin de séance).
+  # Les stops et sorties de positions existantes restent autorisés.
+  close_buffer_minutes: 15
+
 # Paramètres du backtest
 backtest:
   start_date: "2018-01-01"
@@ -66,5 +90,12 @@ backtest:
 live:
   # Intervalle entre deux cycles de décision (en secondes). 3600 = toutes les heures.
   loop_interval_seconds: 3600
-  # Ne trader que lorsque le marché US est ouvert (utilise l'horloge Alpaca)
+  # Ne trader que lorsque le marché US est ouvert, d'après le calendrier
+  # (voir market: ci-dessus). Si false, ignore complètement les horaires de
+  # marché (utile pour tester en dehors des heures de bourse).
   trade_only_when_market_open: true
+  # Fichier utilisé pour persister l'état du bot entre deux redémarrages
+  # (stops suiveurs en cours, état des coupe-circuits). Important : si le
+  # coupe-circuit de drawdown a été déclenché, cet état est conservé même
+  # après un redémarrage, par sécurité.
+  state_file: "state/live_state.json"

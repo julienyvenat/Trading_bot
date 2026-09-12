@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trading_bot.backtest.engine import run_backtest
-from trading_bot.config import AppConfig, BacktestConfig, LiveConfig, RiskConfig, StrategyConfig
+from trading_bot.config import AppConfig, BacktestConfig, LiveConfig, MarketConfig, RiskConfig, StrategyConfig
 
 
 def make_config(**risk_overrides) -> AppConfig:
@@ -13,6 +13,8 @@ def make_config(**risk_overrides) -> AppConfig:
         atr_stop_multiple=2.5,
         atr_window=14,
         max_open_positions=5,
+        max_daily_loss_pct=0.03,
+        max_drawdown_pct=0.20,
     )
     risk_defaults.update(risk_overrides)
 
@@ -23,8 +25,9 @@ def make_config(**risk_overrides) -> AppConfig:
             StrategyConfig(name="sma_crossover", enabled=True, weight=1.0, params={"fast_window": 10, "slow_window": 30}),
         ],
         risk=RiskConfig(**risk_defaults),
+        market=MarketConfig(calendar="NYSE", close_buffer_minutes=15),
         backtest=BacktestConfig(start_date="2020-01-01", end_date=None, initial_cash=100_000, commission_pct=0.0005),
-        live=LiveConfig(loop_interval_seconds=3600, trade_only_when_market_open=True),
+        live=LiveConfig(loop_interval_seconds=3600, trade_only_when_market_open=True, state_file="state/live_state.json"),
     )
 
 

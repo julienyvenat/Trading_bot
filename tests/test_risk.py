@@ -13,6 +13,8 @@ def make_risk_manager(**overrides) -> RiskManager:
         atr_stop_multiple=2.5,
         atr_window=14,
         max_open_positions=8,
+        max_daily_loss_pct=0.03,
+        max_drawdown_pct=0.20,
     )
     defaults.update(overrides)
     return RiskManager(RiskConfig(**defaults))

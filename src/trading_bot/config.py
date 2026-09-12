@@ -30,6 +30,14 @@ class RiskConfig:
     atr_stop_multiple: float
     atr_window: int
     max_open_positions: int
+    max_daily_loss_pct: float
+    max_drawdown_pct: float
+
+
+@dataclass
+class MarketConfig:
+    calendar: str
+    close_buffer_minutes: int
 
 
 @dataclass
@@ -44,6 +52,7 @@ class BacktestConfig:
 class LiveConfig:
     loop_interval_seconds: int
     trade_only_when_market_open: bool
+    state_file: str = "state/live_state.json"
 
 
 @dataclass
@@ -52,6 +61,7 @@ class AppConfig:
     timeframe: str
     strategies: list[StrategyConfig]
     risk: RiskConfig
+    market: MarketConfig
     backtest: BacktestConfig
     live: LiveConfig
 
@@ -82,6 +92,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         timeframe=raw["universe"].get("timeframe", "1Day"),
         strategies=strategies,
         risk=RiskConfig(**raw["risk"]),
+        market=MarketConfig(**raw["market"]),
         backtest=BacktestConfig(**raw["backtest"]),
         live=LiveConfig(**raw["live"]),
     )

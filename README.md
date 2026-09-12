@@ -14,16 +14,36 @@ exactement les mêmes briques que le trading live.
   - `rsi_mean_reversion` : retour à la moyenne (RSI survente/surachat)
   - `momentum_breakout` : breakout de momentum (canal de Donchian)
   - Facile d'en ajouter de nouvelles (voir [Ajouter une stratégie](#ajouter-une-stratégie)).
-- **Gestion du risque** : dimensionnement des positions basé sur l'ATR (risque
-  max par trade), poids max par position, exposition brute max du
-  portefeuille, nombre max de positions ouvertes.
+- **Gestion du risque** :
+  - Dimensionnement des positions basé sur l'ATR (risque max par trade), poids
+    max par position, exposition brute max du portefeuille, nombre max de
+    positions ouvertes.
+  - **Stop-loss suiveur (trailing ATR)** sur chaque position : le stop ne se
+    déplace jamais en défaveur de la position, il ne fait que "ratchet" dans
+    le sens favorable au fur et à mesure qu'elle progresse.
+  - **Coupe-circuit de perte journalière** : bloque toute nouvelle entrée
+    (ou augmentation de position) pour le reste de la séance si la perte du
+    jour dépasse un seuil configurable ; se réinitialise à la séance suivante.
+  - **Coupe-circuit de drawdown** : liquide tout le portefeuille et arrête le
+    bot si l'equity chute de plus d'un certain pourcentage depuis son plus
+    haut historique ; ne se réinitialise **jamais** tout seul (reprise
+    manuelle obligatoire, voir [Reprise après coupe-circuit](#reprise-après-coupe-circuit-de-drawdown)).
+- **Calendrier de marché réel** (NYSE par défaut, via `pandas-market-calendars`) :
+  jours fériés et fermetures anticipées gérés nativement, aucune nouvelle
+  position ouverte dans les dernières minutes avant la clôture, et le moteur
+  live dort intelligemment jusqu'à la prochaine séance plutôt que de sonder en
+  boucle.
 - **Backtest** event-driven sur données historiques (via `yfinance`), avec
-  courbe d'equity et métriques (rendement, volatilité, Sharpe, max drawdown).
+  courbe d'equity et métriques (rendement, volatilité, Sharpe, max drawdown) —
+  et applique exactement les mêmes stops et coupe-circuits que le live.
 - **Paper trading** en continu via l'API Alpaca (compte de simulation gratuit),
-  avec bascule facile vers un compte réel (à vos risques).
-- Architecture modulaire : le code de stratégie/risque/allocation est
-  strictement identique entre backtest et live, pour éviter les écarts de
-  comportement entre "ce qui est testé" et "ce qui est tradé".
+  avec bascule facile vers un compte réel (à vos risques). L'état du bot
+  (stops en cours, coupe-circuits) est persisté sur disque entre deux
+  redémarrages.
+- Architecture modulaire : le code de stratégie/risque/allocation/stops/
+  coupe-circuits est strictement identique entre backtest et live, pour
+  éviter les écarts de comportement entre "ce qui est testé" et "ce qui est
+  tradé".
 
 ## Avertissement
 
@@ -68,7 +88,9 @@ python -m trading_bot backtest -o equity_curve.csv
 ```
 
 Affiche les métriques de performance (rendement total/annualisé, volatilité,
-Sharpe, max drawdown, taux de jours positifs).
+Sharpe, max drawdown, taux de jours positifs), le nombre de sorties
+déclenchées par le stop suiveur, et signale si un coupe-circuit s'est
+déclenché pendant la période testée.
 
 ### Paper trading
 
@@ -87,6 +109,25 @@ en paper trading).
 ⚠️ Pour trader en argent réel, passe `ALPACA_PAPER=false` dans `.env` **après**
 avoir validé ta stratégie en paper trading pendant une durée significative.
 
+### Reprise après coupe-circuit de drawdown
+
+Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
+liquide toutes les positions et refuse de retrader — y compris après un
+redémarrage, car cet état est persisté dans `live.state_file`
+(`state/live_state.json` par défaut). C'est volontaire : un drawdown important
+mérite une revue humaine avant de relancer le capital.
+
+Pour reprendre le trading après avoir analysé la situation :
+
+```bash
+# Option 1 : repartir d'un état neutre (perd l'historique des stops en cours,
+# ce qui est normal puisque tout a été flatten par le coupe-circuit)
+rm state/live_state.json
+
+# Option 2 : éditer manuellement le fichier et repasser
+# "drawdown_halted" à false dans risk_state, si tu veux conserver le reste de l'état.
+```
+
 ### Tests
 
 ```bash
@@ -95,7 +136,8 @@ pytest
 
 Les tests unitaires utilisent des données synthétiques (aucun accès réseau
 requis) et couvrent les indicateurs, les stratégies, l'allocateur
-multi-stratégies, la gestion du risque et le moteur de backtest.
+multi-stratégies, la gestion du risque, le stop suiveur, les coupe-circuits,
+le calendrier de marché, la persistance d'état et le moteur de backtest.
 
 ## Architecture
 
@@ -103,6 +145,8 @@ multi-stratégies, la gestion du risque et le moteur de backtest.
 src/trading_bot/
   config.py           # chargement de config.yaml + .env
   indicators.py        # SMA, RSI, ATR, rolling max/min
+  market_calendar.py    # calendrier de marché (NYSE) : jours fériés, horaires, fermetures anticipées
+  state.py               # persistance JSON de l'état live (stops en cours, coupe-circuits)
   data/
     historical.py       # données historiques (yfinance) pour le backtest
     market_data.py       # données récentes (Alpaca) pour le live
@@ -113,6 +157,8 @@ src/trading_bot/
   portfolio/
     allocator.py          # combine les signaux de plusieurs stratégies
     risk.py                # dimensionnement des positions + caps de risque
+    stops.py                # stop-loss suiveur ATR (logique pure)
+    circuit_breaker.py        # coupe-circuits perte journalière / drawdown
   execution/
     broker_base.py          # interface abstraite de broker
     alpaca_broker.py          # implémentation Alpaca
@@ -143,10 +189,16 @@ en compte en backtest comme en live.
 - Le backtest exécute au prix de clôture du jour où le signal est calculé
   (approximation optimiste courante pour un prototype) ; envisager une
   exécution à l'ouverture du jour suivant pour plus de réalisme.
-- Pas encore de gestion des jours fériés / calendrier de marché fin (repose
-  sur les données disponibles).
-- Pas de persistance d'état entre redémarrages du moteur live (l'état réel
-  du portefeuille est toujours relu depuis Alpaca à chaque cycle, ce qui
-  limite l'impact mais ne conserve pas d'historique de décisions).
+- Le stop suiveur n'est vérifié qu'une fois par pas de temps (jour en
+  backtest, `loop_interval_seconds` en live) : un mouvement violent
+  *intra-cycle* qui reviendrait avant le prochain contrôle ne serait pas
+  capturé. En live, une amélioration possible est de déléguer le stop au
+  broker via un ordre stop natif (réagit en continu), plutôt que de le
+  vérifier en Python à chaque cycle.
+- Pas de dimensionnement basé sur la corrélation entre positions (deux
+  actions très corrélées peuvent chacune passer les caps de risque
+  individuels tout en concentrant le risque réel du portefeuille).
+- Pas de ciblage de volatilité au niveau du portefeuille global (le risque
+  par trade est individuel, pas agrégé en une cible de volatilité globale).
 - Le slippage est approximé par un pourcentage de commission fixe dans le
   backtest ; pas de modélisation de l'impact de marché.

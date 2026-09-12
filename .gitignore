@@ -22,3 +22,7 @@ data/cache/
 logs/
 *.log
 backtests/results/
+
+# État persistant du moteur live (stops suiveurs, coupe-circuits) : local à
+# chaque déploiement, ne doit jamais être commité ni partagé entre environnements.
+state/
