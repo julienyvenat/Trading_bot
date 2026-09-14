@@ -31,8 +31,23 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         logger.error("Aucune donnée téléchargée. Vérifie les symboles et ta connexion réseau.")
         sys.exit(1)
 
+    benchmark_df = None
+    regime_config = config.market.regime_filter
+    if regime_config.enabled and regime_config.symbol not in data_by_symbol:
+        bench_data = fetch_historical_data(
+            [regime_config.symbol],
+            start_date=config.backtest.start_date,
+            end_date=config.backtest.end_date,
+        )
+        benchmark_df = bench_data.get(regime_config.symbol)
+        if benchmark_df is None:
+            logger.warning(
+                "Impossible de récupérer les données de %s pour le filtre de régime : filtre ignoré.",
+                regime_config.symbol,
+            )
+
     logger.info("Lancement du backtest sur %d symboles...", len(data_by_symbol))
-    result = run_backtest(config, data_by_symbol)
+    result = run_backtest(config, data_by_symbol, benchmark_df=benchmark_df)
 
     print("\n=== Résultats du backtest ===")
     print(result.metrics.summary())

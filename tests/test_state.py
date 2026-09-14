@@ -18,6 +18,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
     path = tmp_path / "state" / "live_state.json"
     original = LiveState(
         trailing_stops={"AAPL": StopLevel(direction=1, stop_price=150.0)},
+        stop_order_ids={"AAPL": "abc-123"},
         risk_state=RiskState(
             equity_peak=110_000,
             session_start_equity=105_000,
@@ -32,6 +33,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
 
     loaded = load_state(path)
     assert loaded.trailing_stops["AAPL"] == StopLevel(direction=1, stop_price=150.0)
+    assert loaded.stop_order_ids == {"AAPL": "abc-123"}
     assert loaded.risk_state == original.risk_state
 
 

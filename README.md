@@ -20,7 +20,14 @@ exactement les mêmes briques que le trading live.
     positions ouvertes.
   - **Stop-loss suiveur (trailing ATR)** sur chaque position : le stop ne se
     déplace jamais en défaveur de la position, il ne fait que "ratchet" dans
-    le sens favorable au fur et à mesure qu'elle progresse.
+    le sens favorable au fur et à mesure qu'elle progresse. En live, il est
+    délégué à un **ordre stop natif posé chez le broker** (réagit en continu),
+    plutôt que vérifié uniquement à chaque cycle côté bot.
+  - **Filtre de régime de marché** : réduit (ou coupe) l'exposition du
+    portefeuille quand un indice de référence (SPY par défaut) est en
+    tendance baissière (sous sa SMA 200), pour limiter les pertes en marché
+    baissier généralisé — le bot est long-only et sans ce filtre rien ne
+    réduit l'exposition dans ce cas. Voir `config.yaml -> market.regime_filter`.
   - **Coupe-circuit de perte journalière** : bloque toute nouvelle entrée
     (ou augmentation de position) pour le reste de la séance si la perte du
     jour dépasse un seuil configurable ; se réinitialise à la séance suivante.
@@ -35,11 +42,13 @@ exactement les mêmes briques que le trading live.
   boucle.
 - **Backtest** event-driven sur données historiques (via `yfinance`), avec
   courbe d'equity et métriques (rendement, volatilité, Sharpe, max drawdown) —
-  et applique exactement les mêmes stops et coupe-circuits que le live.
+  et applique exactement les mêmes stops et coupe-circuits que le live. Le
+  signal calculé à la clôture du jour J s'exécute à l'**ouverture du jour
+  suivant** (J+1), plus réaliste qu'une exécution immédiate à la clôture.
 - **Paper trading** en continu via l'API Alpaca (compte de simulation gratuit),
   avec bascule facile vers un compte réel (à vos risques). L'état du bot
-  (stops en cours, coupe-circuits) est persisté sur disque entre deux
-  redémarrages.
+  (stops en cours, ordres stop natifs, coupe-circuits) est persisté sur disque
+  entre deux redémarrages.
 - Architecture modulaire : le code de stratégie/risque/allocation/stops/
   coupe-circuits est strictement identique entre backtest et live, pour
   éviter les écarts de comportement entre "ce qui est testé" et "ce qui est
@@ -159,6 +168,7 @@ src/trading_bot/
     risk.py                # dimensionnement des positions + caps de risque
     stops.py                # stop-loss suiveur ATR (logique pure)
     circuit_breaker.py        # coupe-circuits perte journalière / drawdown
+    regime.py                  # filtre de régime de marché (SMA du benchmark)
   execution/
     broker_base.py          # interface abstraite de broker
     alpaca_broker.py          # implémentation Alpaca
@@ -186,15 +196,13 @@ en compte en backtest comme en live.
 
 ## Limites connues / pistes d'amélioration
 
-- Le backtest exécute au prix de clôture du jour où le signal est calculé
-  (approximation optimiste courante pour un prototype) ; envisager une
-  exécution à l'ouverture du jour suivant pour plus de réalisme.
-- Le stop suiveur n'est vérifié qu'une fois par pas de temps (jour en
-  backtest, `loop_interval_seconds` en live) : un mouvement violent
-  *intra-cycle* qui reviendrait avant le prochain contrôle ne serait pas
-  capturé. En live, une amélioration possible est de déléguer le stop au
-  broker via un ordre stop natif (réagit en continu), plutôt que de le
-  vérifier en Python à chaque cycle.
+- Le filtre de régime de marché est un simple seuil (clôture vs SMA) : il peut
+  "whipsaw" (bascules répétées) si le prix oscille autour de sa moyenne
+  mobile ; pas de zone morte ni de confirmation multi-jours pour l'instant.
+- En live, après un ordre de rebalancement, le bot relit immédiatement les
+  positions chez le broker pour poser le stop natif sur la quantité réelle ;
+  rien ne garantit que l'ordre ait déjà fillé à cet instant précis (pas
+  d'attente bloquante). Le cycle suivant corrige la situation si besoin.
 - Pas de dimensionnement basé sur la corrélation entre positions (deux
   actions très corrélées peuvent chacune passer les caps de risque
   individuels tout en concentrant le risque réel du portefeuille).

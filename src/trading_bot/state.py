@@ -1,8 +1,11 @@
 """Persistance de l'état du moteur live entre deux redémarrages.
 
-Deux choses doivent survivre à un redémarrage du bot :
+Trois choses doivent survivre à un redémarrage du bot :
   - les stops suiveurs en cours (sinon on perdrait le "ratchet" et repartirait
     d'un stop plus large que ce qu'il devrait être) ;
+  - les identifiants des ordres stop natifs posés chez le broker pour chaque
+    position (nécessaire pour pouvoir les annuler/remplacer au bon moment,
+    voir `trading_bot.live.engine`) ;
   - l'état des coupe-circuits, en particulier le coupe-circuit de drawdown,
     qui est volontairement "sticky" : si le bot crashe puis redémarre après
     l'avoir déclenché, il DOIT rester arrêté plutôt que de repartir comme si
@@ -22,6 +25,10 @@ from trading_bot.portfolio.stops import StopLevel
 @dataclass
 class LiveState:
     trailing_stops: dict[str, StopLevel] = field(default_factory=dict)
+    # Identifiant (côté broker) de l'ordre stop natif actuellement posé pour
+    # chaque symbole ayant une position ouverte. Absent si aucun ordre stop
+    # natif n'est actuellement posé (ex: dry-run, ou pas encore soumis).
+    stop_order_ids: dict[str, str] = field(default_factory=dict)
     risk_state: RiskState | None = None
 
     def to_dict(self) -> dict:
@@ -30,6 +37,7 @@ class LiveState:
                 symbol: {"direction": stop.direction, "stop_price": stop.stop_price}
                 for symbol, stop in self.trailing_stops.items()
             },
+            "stop_order_ids": dict(self.stop_order_ids),
             "risk_state": self.risk_state.to_dict() if self.risk_state else None,
         }
 
@@ -39,8 +47,9 @@ class LiveState:
             symbol: StopLevel(direction=v["direction"], stop_price=v["stop_price"])
             for symbol, v in data.get("trailing_stops", {}).items()
         }
+        stop_order_ids = dict(data.get("stop_order_ids", {}))
         risk_state = RiskState.from_dict(data["risk_state"]) if data.get("risk_state") else None
-        return cls(trailing_stops=stops, risk_state=risk_state)
+        return cls(trailing_stops=stops, stop_order_ids=stop_order_ids, risk_state=risk_state)
 
 
 def load_state(path: str | Path) -> LiveState:

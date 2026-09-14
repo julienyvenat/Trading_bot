@@ -55,6 +55,32 @@ class AlpacaBroker(Broker):
         )
         self._trading_client.submit_order(request)
 
+    def submit_stop_order(self, symbol: str, qty: float, side: str, stop_price: float) -> str:
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import StopOrderRequest
+
+        order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
+        request = StopOrderRequest(
+            symbol=symbol,
+            qty=round(qty, 4),
+            side=order_side,
+            time_in_force=TimeInForce.GTC,
+            stop_price=round(stop_price, 2),
+        )
+        order = self._trading_client.submit_order(request)
+        return str(order.id)
+
+    def cancel_order(self, order_id: str) -> None:
+        from alpaca.common.exceptions import APIError
+
+        try:
+            self._trading_client.cancel_order_by_id(order_id)
+        except APIError:
+            # Cas normal : l'ordre a déjà été exécuté (le stop a fillé) ou
+            # déjà annulé entre deux cycles. Rien à faire de plus ici, c'est
+            # à l'appelant de nettoyer son propre état si besoin.
+            pass
+
     def is_market_open(self) -> bool:
         clock = self._trading_client.get_clock()
         return bool(clock.is_open)

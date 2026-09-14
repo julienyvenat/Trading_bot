@@ -35,9 +35,26 @@ class RiskConfig:
 
 
 @dataclass
+class RegimeFilterConfig:
+    """Filtre de régime de marché (voir `trading_bot.portfolio.regime`).
+
+    Réduit l'exposition du portefeuille quand `symbol` clôture sous sa
+    moyenne mobile `sma_window` (régime baissier). Désactivé par défaut pour
+    rester rétro-compatible avec un config.yaml qui ne déclare pas cette
+    section.
+    """
+
+    enabled: bool = False
+    symbol: str = "SPY"
+    sma_window: int = 200
+    bearish_exposure_scale: float = 0.3
+
+
+@dataclass
 class MarketConfig:
     calendar: str
     close_buffer_minutes: int
+    regime_filter: RegimeFilterConfig = field(default_factory=RegimeFilterConfig)
 
 
 @dataclass
@@ -87,12 +104,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         for s in raw.get("strategies", [])
     ]
 
+    market_raw = dict(raw["market"])
+    regime_raw = market_raw.pop("regime_filter", None) or {}
+
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
         timeframe=raw["universe"].get("timeframe", "1Day"),
         strategies=strategies,
         risk=RiskConfig(**raw["risk"]),
-        market=MarketConfig(**raw["market"]),
+        market=MarketConfig(**market_raw, regime_filter=RegimeFilterConfig(**regime_raw)),
         backtest=BacktestConfig(**raw["backtest"]),
         live=LiveConfig(**raw["live"]),
     )

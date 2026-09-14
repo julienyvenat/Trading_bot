@@ -5,12 +5,16 @@ allocateur multi-stratégies, gestion du risque, stop suiveur, coupe-circuits,
 calendrier de marché) pour garantir une parité maximale entre backtest et
 live : ce qui est testé est ce qui est tradé.
 
-Simplification assumée : le signal calculé à partir de la clôture du jour J
-est exécuté à la clôture de J (pas de décalage J+1 open). C'est une
-approximation optimiste courante pour un premier prototype ; à garder en
-tête en comparant les résultats du backtest à ceux du paper trading. Le
-stop suiveur, lui, est vérifié contre le plus bas/plus haut intrajournalier
-(low/high), ce qui est plus réaliste qu'une simple comparaison de clôture.
+Exécution des ordres : le signal (et le dimensionnement du risque qui en
+découle) est calculé à partir de la clôture du jour J, mais exécuté à
+l'ouverture du jour de bourse suivant J+1 — la quantité est recalculée à ce
+moment-là avec l'equity et le prix d'ouverture réels, comme le ferait un
+opérateur qui déciderait le soir sur la clôture et passerait ses ordres le
+lendemain matin. C'est plus réaliste qu'une exécution immédiate à la clôture
+du jour même où le signal est calculé (approximation optimiste qu'on
+utilisait auparavant). Le stop suiveur, lui, reste vérifié le jour même
+contre le plus bas/plus haut intrajournalier (low/high), ce qui est déjà
+réaliste.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from trading_bot.logger import get_logger
 from trading_bot.market_calendar import MarketCalendar
 from trading_bot.portfolio.allocator import SignalAllocator
 from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, apply_halt
+from trading_bot.portfolio.regime import regime_scale_series
 from trading_bot.portfolio.risk import RiskManager
 from trading_bot.portfolio.stops import StopLevel, is_triggered, update_stop
 from trading_bot.strategies.registry import build_enabled_strategies
@@ -56,7 +61,51 @@ def _portfolio_value(positions: dict[str, float], prices: pd.Series) -> float:
     return value
 
 
-def run_backtest(config: AppConfig, data_by_symbol: dict[str, pd.DataFrame]) -> BacktestResult:
+def _execute_at_open(
+    pending_target_weights: dict[str, float],
+    positions: dict[str, float],
+    cash: float,
+    open_prices: pd.Series,
+    commission_pct: float,
+) -> tuple[dict[str, float], float]:
+    """Exécute, au prix d'ouverture `open_prices`, les poids cibles décidés à
+    la clôture du jour précédent. Fonction pure (ne mute pas `positions`) :
+    renvoie les positions et le cash mis à jour."""
+    equity_at_open = cash + _portfolio_value(positions, open_prices)
+    updated_positions = dict(positions)
+
+    for symbol, target_weight in pending_target_weights.items():
+        price = open_prices.get(symbol)
+        if price is None or pd.isna(price) or price <= 0:
+            continue  # pas de prix d'ouverture ce jour-là : ordre perdu (marché fermé pour ce symbole)
+
+        target_qty = (target_weight * equity_at_open) / price if equity_at_open > 0 else 0.0
+        current_qty = updated_positions[symbol]
+        delta_qty = target_qty - current_qty
+        if abs(delta_qty) * price < MIN_TRADE_VALUE:
+            continue
+
+        trade_value = delta_qty * price
+        commission = abs(trade_value) * commission_pct
+        cash -= trade_value + commission
+        updated_positions[symbol] = target_qty
+
+    return updated_positions, cash
+
+
+def run_backtest(
+    config: AppConfig,
+    data_by_symbol: dict[str, pd.DataFrame],
+    benchmark_df: pd.DataFrame | None = None,
+) -> BacktestResult:
+    """Lance le backtest.
+
+    `benchmark_df` : données OHLCV du symbole de référence du filtre de
+    régime (`config.market.regime_filter.symbol`), uniquement nécessaire s'il
+    n'est PAS déjà dans `data_by_symbol` (auquel cas il est réutilisé
+    directement). Ce symbole n'est jamais tradé pour lui-même via ce
+    paramètre : il ne sert qu'à calculer le facteur de régime.
+    """
     if not data_by_symbol:
         raise ValueError("Aucune donnée historique fournie pour le backtest.")
 
@@ -69,6 +118,22 @@ def run_backtest(config: AppConfig, data_by_symbol: dict[str, pd.DataFrame]) -> 
     atr_series = {sym: atr(df, config.risk.atr_window) for sym, df in data_by_symbol.items()}
 
     close_df = pd.DataFrame({sym: df["close"] for sym, df in data_by_symbol.items()}).sort_index().ffill()
+    open_df = pd.DataFrame({sym: df["open"] for sym, df in data_by_symbol.items()}).sort_index().ffill()
+
+    regime_config = config.market.regime_filter
+    regime_scale_by_date: pd.Series | None = None
+    if regime_config.enabled:
+        bench_source = benchmark_df if benchmark_df is not None else data_by_symbol.get(regime_config.symbol)
+        if bench_source is None:
+            logger.warning(
+                "Filtre de régime activé pour %s mais aucune donnée disponible (ni dans l'univers "
+                "tradé, ni via `benchmark_df`) : filtre ignoré pour ce backtest.",
+                regime_config.symbol,
+            )
+        else:
+            regime_scale_by_date = regime_scale_series(
+                bench_source["close"], regime_config.sma_window, regime_config.bearish_exposure_scale
+            )
 
     start = pd.Timestamp(config.backtest.start_date)
     end = pd.Timestamp(config.backtest.end_date) if config.backtest.end_date else close_df.index.max()
@@ -96,8 +161,17 @@ def run_backtest(config: AppConfig, data_by_symbol: dict[str, pd.DataFrame]) -> 
     equity_records: dict[pd.Timestamp, float] = {}
     risk_state: RiskState | None = None
     num_stop_exits = 0
+    # Poids cibles décidés à la clôture d'un jour, exécutés à l'ouverture du
+    # jour de bourse suivant (voir docstring du module).
+    pending_target_weights: dict[str, float] | None = None
 
     for dt in dates:
+        # 0) Exécute, au prix d'ouverture d'aujourd'hui, la décision prise à
+        # la clôture d'hier (rien à faire le tout premier jour).
+        if pending_target_weights is not None:
+            positions, cash = _execute_at_open(pending_target_weights, positions, cash, open_df.loc[dt], commission_pct)
+            pending_target_weights = None
+
         prices = close_df.loc[dt]
         equity = cash + _portfolio_value(positions, prices)
         if equity <= 0:
@@ -131,12 +205,22 @@ def run_backtest(config: AppConfig, data_by_symbol: dict[str, pd.DataFrame]) -> 
 
         risk_state = circuit_breaker.update(risk_state, equity, dt.date())
 
-        # 2) Construit les tailles candidates par symbole à partir des signaux du jour.
+        # 2) Construit les tailles candidates par symbole à partir des signaux du jour,
+        # modulées par le filtre de régime de marché s'il est actif.
+        regime_scale = 1.0
+        if regime_scale_by_date is not None:
+            regime_value = regime_scale_by_date.get(dt)
+            if regime_value is not None and pd.notna(regime_value):
+                regime_scale = float(regime_value)
+
         raw_sizings = {}
         for symbol in data_by_symbol:
             series = exposure_series[symbol]
             exposure = series.loc[dt] if dt in series.index else None
-            if exposure is None or pd.isna(exposure) or abs(exposure) <= 1e-9:
+            if exposure is None or pd.isna(exposure):
+                continue
+            exposure = float(exposure) * regime_scale
+            if abs(exposure) <= 1e-9:
                 continue
 
             price = prices.get(symbol)
@@ -157,24 +241,12 @@ def run_backtest(config: AppConfig, data_by_symbol: dict[str, pd.DataFrame]) -> 
         }
         final_sizings = apply_halt(final_sizings, current_weights, risk_state)
 
-        # 4) Rebalance vers les poids cibles (0 pour les symboles non sélectionnés).
-        for symbol in data_by_symbol:
-            price = prices.get(symbol)
-            if price is None or pd.isna(price) or price <= 0:
-                continue
-
-            target_weight = final_sizings[symbol].target_weight if symbol in final_sizings else 0.0
-            target_qty = (target_weight * equity) / price
-            current_qty = positions[symbol]
-            delta_qty = target_qty - current_qty
-
-            if abs(delta_qty) * price < MIN_TRADE_VALUE:
-                continue
-
-            trade_value = delta_qty * price
-            commission = abs(trade_value) * commission_pct
-            cash -= trade_value + commission
-            positions[symbol] = target_qty
+        # 4) Mémorise les poids cibles décidés aujourd'hui (0 pour les symboles non
+        # sélectionnés, pour bien les flatten) : exécutés à l'ouverture de demain (étape 0).
+        pending_target_weights = {
+            symbol: (final_sizings[symbol].target_weight if symbol in final_sizings else 0.0)
+            for symbol in data_by_symbol
+        }
 
         # 5) Met à jour le stop suiveur de chaque position encore ouverte, pour demain.
         for symbol, qty in positions.items():

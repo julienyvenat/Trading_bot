@@ -37,4 +37,20 @@ class Broker(ABC):
         ...
 
     @abstractmethod
+    def submit_stop_order(self, symbol: str, qty: float, side: str, stop_price: float) -> str:
+        """Envoie un ordre stop natif (déclenché en continu par le broker,
+        contrairement à un stop suiveur vérifié uniquement à chaque cycle
+        Python). `side` : 'buy' ou 'sell' (sens de la sortie, pas de la
+        position). `qty` toujours positif. Renvoie l'identifiant d'ordre du
+        broker, à conserver pour pouvoir l'annuler/le remplacer plus tard."""
+        ...
+
+    @abstractmethod
+    def cancel_order(self, order_id: str) -> None:
+        """Annule un ordre existant. Ne doit pas lever si l'ordre n'existe
+        plus (déjà exécuté ou déjà annulé) : c'est un cas normal, à gérer par
+        l'appelant plutôt que de faire planter le cycle live."""
+        ...
+
+    @abstractmethod
     def is_market_open(self) -> bool: ...

@@ -79,6 +79,21 @@ market:
   # Les stops et sorties de positions existantes restent autorisés.
   close_buffer_minutes: 15
 
+  # Filtre de régime de marché : réduit l'exposition du portefeuille quand
+  # `symbol` clôture sous sa moyenne mobile `sma_window` (régime baissier).
+  # Le bot est long-only et sans ce filtre rien ne réduit l'exposition en
+  # marché baissier généralisé (constaté sur le backtest 2022 : -16%,
+  # Sharpe -1.71). `symbol` n'a pas besoin d'être dans `universe.symbols` :
+  # il est utilisé uniquement comme référence, jamais tradé pour lui-même
+  # via ce mécanisme (il ne sera tradé que s'il figure aussi dans symbols).
+  regime_filter:
+    enabled: true
+    symbol: "SPY"
+    sma_window: 200
+    # Facteur appliqué aux expositions cibles en régime baissier.
+    # 0.0 = flatten total, 1.0 = filtre désactivé.
+    bearish_exposure_scale: 0.3
+
 # Paramètres du backtest
 backtest:
   start_date: "2018-01-01"
