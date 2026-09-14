@@ -32,6 +32,26 @@ def test_rsi_mean_reversion_flat_on_flat_market(flat_df):
     assert signal == 0.0
 
 
+def test_rsi_mean_reversion_trend_filter_blocks_entry_in_downtrend(trending_down_df):
+    """Sans historique suffisant au-dessus de la SMA 200, ou en tendance
+    baissière franche, le filtre de tendance doit bloquer les entrées même si
+    le RSI passe en survente."""
+    strategy = RsiMeanReversionStrategy(rsi_window=14, oversold=70, trend_filter_window=50)
+    # oversold=70 force presque toujours des "entrées" côté RSI seul, pour
+    # isoler l'effet du filtre de tendance : en tendance baissière, le prix
+    # reste sous sa SMA 50, donc le filtre doit rester à 0 malgré tout.
+    signal = strategy.latest_signal(trending_down_df)
+    assert signal == 0.0
+
+
+def test_rsi_mean_reversion_trend_filter_disabled_keeps_old_behavior(trending_down_df):
+    with_filter = RsiMeanReversionStrategy(oversold=70, trend_filter_window=None)
+    signals = with_filter.generate_signals(trending_down_df)
+    # oversold=70 en tendance baissière déclenche presque toujours l'entrée
+    # dès que le filtre de tendance est désactivé.
+    assert signals.iloc[-1] == 1.0
+
+
 def test_momentum_breakout_goes_long_in_uptrend(trending_up_df):
     strategy = MomentumBreakoutStrategy(lookback_window=20, exit_window=10)
     signals = strategy.generate_signals(trending_up_df)

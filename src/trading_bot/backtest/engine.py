@@ -33,6 +33,7 @@ from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, app
 from trading_bot.portfolio.regime import regime_scale_series
 from trading_bot.portfolio.risk import RiskManager
 from trading_bot.portfolio.stops import StopLevel, is_triggered, update_stop
+from trading_bot.portfolio.volatility_filter import volatility_scale_series
 from trading_bot.strategies.registry import build_enabled_strategies
 
 logger = get_logger()
@@ -97,6 +98,7 @@ def run_backtest(
     config: AppConfig,
     data_by_symbol: dict[str, pd.DataFrame],
     benchmark_df: pd.DataFrame | None = None,
+    volatility_benchmark_df: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Lance le backtest.
 
@@ -105,6 +107,10 @@ def run_backtest(
     n'est PAS déjà dans `data_by_symbol` (auquel cas il est réutilisé
     directement). Ce symbole n'est jamais tradé pour lui-même via ce
     paramètre : il ne sert qu'à calculer le facteur de régime.
+
+    `volatility_benchmark_df` : même principe pour le proxy de volatilité du
+    filtre `config.market.volatility_filter.symbol` (voir
+    `trading_bot.portfolio.volatility_filter`).
     """
     if not data_by_symbol:
         raise ValueError("Aucune donnée historique fournie pour le backtest.")
@@ -133,6 +139,26 @@ def run_backtest(
         else:
             regime_scale_by_date = regime_scale_series(
                 bench_source["close"], regime_config.sma_window, regime_config.bearish_exposure_scale
+            )
+
+    volatility_config = config.market.volatility_filter
+    volatility_scale_by_date: pd.Series | None = None
+    if volatility_config.enabled:
+        vol_source = volatility_benchmark_df if volatility_benchmark_df is not None else data_by_symbol.get(
+            volatility_config.symbol
+        )
+        if vol_source is None:
+            logger.warning(
+                "Filtre de volatilité activé pour %s mais aucune donnée disponible (ni dans l'univers "
+                "tradé, ni via `volatility_benchmark_df`) : filtre ignoré pour ce backtest.",
+                volatility_config.symbol,
+            )
+        else:
+            volatility_scale_by_date = volatility_scale_series(
+                vol_source["close"],
+                volatility_config.sma_window,
+                volatility_config.spike_threshold_pct,
+                volatility_config.spike_exposure_scale,
             )
 
     start = pd.Timestamp(config.backtest.start_date)
@@ -206,12 +232,21 @@ def run_backtest(
         risk_state = circuit_breaker.update(risk_state, equity, dt.date())
 
         # 2) Construit les tailles candidates par symbole à partir des signaux du jour,
-        # modulées par le filtre de régime de marché s'il est actif.
+        # modulées par le filtre de régime de marché et le filtre de
+        # volatilité s'ils sont actifs (combinés multiplicativement : un pic
+        # de volatilité peut survenir même en régime haussier, voir
+        # `trading_bot.portfolio.volatility_filter`).
         regime_scale = 1.0
         if regime_scale_by_date is not None:
             regime_value = regime_scale_by_date.get(dt)
             if regime_value is not None and pd.notna(regime_value):
                 regime_scale = float(regime_value)
+
+        vol_scale = 1.0
+        if volatility_scale_by_date is not None:
+            vol_value = volatility_scale_by_date.get(dt)
+            if vol_value is not None and pd.notna(vol_value):
+                vol_scale = float(vol_value)
 
         raw_sizings = {}
         for symbol in data_by_symbol:
@@ -219,8 +254,9 @@ def run_backtest(
             exposure = series.loc[dt] if dt in series.index else None
             if exposure is None or pd.isna(exposure):
                 continue
-            symbol_scale = 1.0 if symbol in regime_config.exempt_symbols else regime_scale
-            exposure = float(exposure) * symbol_scale
+            symbol_regime_scale = 1.0 if symbol in regime_config.exempt_symbols else regime_scale
+            symbol_vol_scale = 1.0 if symbol in volatility_config.exempt_symbols else vol_scale
+            exposure = float(exposure) * symbol_regime_scale * symbol_vol_scale
             if abs(exposure) <= 1e-9:
                 continue
 

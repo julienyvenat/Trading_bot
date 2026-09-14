@@ -56,10 +56,32 @@ class RegimeFilterConfig:
 
 
 @dataclass
+class VolatilityFilterConfig:
+    """Filtre de volatilité (voir `trading_bot.portfolio.volatility_filter`).
+
+    Réduit l'exposition du portefeuille quand `symbol` (un proxy de
+    volatilité négociable, ex. VIXY qui réplique des futures VIX court
+    terme) s'envole au-dessus de sa moyenne mobile `sma_window`, signe d'un
+    pic de stress de marché. Complémentaire à `RegimeFilterConfig` : celui-ci
+    réagit à la direction du marché, celui-là à l'amplitude des mouvements
+    récents. Désactivé par défaut pour rester rétro-compatible avec un
+    config.yaml qui ne déclare pas cette section.
+    """
+
+    enabled: bool = False
+    symbol: str = "VIXY"
+    sma_window: int = 20
+    spike_threshold_pct: float = 0.15
+    spike_exposure_scale: float = 0.5
+    exempt_symbols: list[str] = field(default_factory=list)
+
+
+@dataclass
 class MarketConfig:
     calendar: str
     close_buffer_minutes: int
     regime_filter: RegimeFilterConfig = field(default_factory=RegimeFilterConfig)
+    volatility_filter: VolatilityFilterConfig = field(default_factory=VolatilityFilterConfig)
 
 
 @dataclass
@@ -78,6 +100,24 @@ class LiveConfig:
 
 
 @dataclass
+class NewsSentimentConfig:
+    """Filtre de sentiment de news (voir `trading_bot.data.news_sentiment`).
+
+    Bloque les NOUVELLES entrées sur un symbole dont les news récentes
+    (API officielle Alpaca, pas de scraping) sont majoritairement négatives
+    (score sous `block_threshold`, avec au moins `min_articles` articles
+    disponibles pour éviter de juger sur un seul titre isolé). Ne s'applique
+    qu'au trading live (voir limite dans `trading_bot.data.news_sentiment`).
+    Désactivé par défaut.
+    """
+
+    enabled: bool = False
+    lookback_hours: int = 48
+    block_threshold: float = -0.3
+    min_articles: int = 2
+
+
+@dataclass
 class AppConfig:
     symbols: list[str]
     timeframe: str
@@ -86,6 +126,7 @@ class AppConfig:
     market: MarketConfig
     backtest: BacktestConfig
     live: LiveConfig
+    news_sentiment: NewsSentimentConfig = field(default_factory=NewsSentimentConfig)
 
     def enabled_strategies(self) -> list[StrategyConfig]:
         return [s for s in self.strategies if s.enabled]
@@ -111,15 +152,22 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     market_raw = dict(raw["market"])
     regime_raw = market_raw.pop("regime_filter", None) or {}
+    volatility_raw = market_raw.pop("volatility_filter", None) or {}
+    news_sentiment_raw = raw.get("news_sentiment", None) or {}
 
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
         timeframe=raw["universe"].get("timeframe", "1Day"),
         strategies=strategies,
         risk=RiskConfig(**raw["risk"]),
-        market=MarketConfig(**market_raw, regime_filter=RegimeFilterConfig(**regime_raw)),
+        market=MarketConfig(
+            **market_raw,
+            regime_filter=RegimeFilterConfig(**regime_raw),
+            volatility_filter=VolatilityFilterConfig(**volatility_raw),
+        ),
         backtest=BacktestConfig(**raw["backtest"]),
         live=LiveConfig(**raw["live"]),
+        news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
     )
 
 

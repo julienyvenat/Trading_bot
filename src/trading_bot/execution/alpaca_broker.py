@@ -64,7 +64,16 @@ class AlpacaBroker(Broker):
             symbol=symbol,
             qty=round(qty, 4),
             side=order_side,
-            time_in_force=TimeInForce.GTC,
+            # DAY et non GTC : Alpaca rejette catégoriquement tout ordre
+            # stop/stop_limit GTC dès que la quantité est fractionnaire
+            # ("stop/stop_limit fractional GTC orders are not enabled"),
+            # et le dimensionnement basé sur l'ATR (`RiskManager`) produit
+            # quasi systématiquement des quantités fractionnaires. Un ordre
+            # DAY expire donc à la clôture : c'est `run_once`
+            # (`trading_bot.live.engine`) qui se charge de le reposer à
+            # chaque nouvelle séance via `state.stop_order_dates`, pas
+            # seulement quand le prix du stop a bougé.
+            time_in_force=TimeInForce.DAY,
             stop_price=round(stop_price, 2),
         )
         order = self._trading_client.submit_order(request)

@@ -12,6 +12,14 @@ universe:
   # en 2022, actions ET obligations ont chuté ensemble (hausse des taux), donc
   # la couverture obligataire a fait défaut pile quand on en avait besoin.
   # L'or (GLD) s'est montré nettement plus robuste sur la période testée.
+  # Crypto (BTC/USD, ETH/USD) volontairement PAS ajouté ici : Alpaca les
+  # trade sous un format de symbole différent ("BTC/USD") avec un client de
+  # données distinct (crypto vs actions/ETF), et le marché crypto est ouvert
+  # 24/7 alors que tout le reste du bot (calendrier NYSE, coupe-circuit
+  # journalier, buffer de clôture) suppose des séances avec horaires fixes.
+  # Le brancher proprement demande d'adapter `market_calendar`,
+  # `data/market_data.py` et `execution/alpaca_broker.py`, pas seulement
+  # d'ajouter des symboles ici — à traiter comme un chantier à part.
   symbols:
     - SPY
     - QQQ
@@ -19,6 +27,14 @@ universe:
     - MSFT
     - NVDA
     - GLD
+    # ETF sectoriels ajoutés pour donner plus de matière à `relative_strength`
+    # (rotation cross-sectionnelle) : sans eux, le "top_n" de la rotation
+    # sectorielle n'avait à choisir qu'entre des symboles très corrélés
+    # tech (AAPL/MSFT/NVDA/QQQ), ce qui limitait la vraie diversification.
+    - XLK # Technologie
+    - XLE # Énergie
+    - XLF # Finance
+    - XLV # Santé
 
   # Granularité des bougies utilisées par les stratégies
   timeframe: "1Day"
@@ -40,6 +56,11 @@ strategies:
       rsi_window: 14
       oversold: 30
       overbought: 70
+      # N'achète un creux de RSI que si le prix est au-dessus de sa SMA 200
+      # (marché haussier sur le fond) : évite d'acheter des creux en pleine
+      # tendance baissière ("couteau qui tombe"), là où le retour à la
+      # moyenne échoue le plus souvent. Mettre à null pour désactiver.
+      trend_filter_window: 200
 
   - name: momentum_breakout
     enabled: true
@@ -132,6 +153,27 @@ market:
     exempt_symbols:
       - GLD
 
+  # Filtre de volatilité : réduit l'exposition quand VIXY (ETF négociable qui
+  # réplique des futures VIX court terme, utilisé comme proxy puisqu'Alpaca
+  # ne fournit pas de données pour l'indice ^VIX lui-même) s'envole au-dessus
+  # de sa moyenne mobile récente, signe d'un pic de stress de marché.
+  # Complémentaire au `regime_filter` ci-dessus : celui-là réagit à la
+  # DIRECTION du marché (tendance longue), celui-ci à l'AMPLITUDE des
+  # mouvements récents (un choc peut survenir même en tendance haussière).
+  # `symbol` n'a pas besoin d'être dans `universe.symbols` : comme pour
+  # `regime_filter.symbol`, il sert uniquement de référence, jamais tradé
+  # pour lui-même via ce mécanisme.
+  volatility_filter:
+    enabled: false # désactivé par défaut : à valider en backtest avant activation live
+    symbol: "VIXY"
+    sma_window: 20
+    # Se déclenche quand VIXY dépasse sa SMA de plus de ce pourcentage.
+    spike_threshold_pct: 0.15
+    # Facteur appliqué aux expositions cibles pendant un pic de volatilité.
+    spike_exposure_scale: 0.5
+    exempt_symbols:
+      - GLD
+
 # Paramètres du backtest
 backtest:
   start_date: "2018-01-01"
@@ -152,3 +194,18 @@ live:
   # coupe-circuit de drawdown a été déclenché, cet état est conservé même
   # après un redémarrage, par sécurité.
   state_file: "state/live_state.json"
+
+# Filtre de sentiment de news (voir trading_bot.data.news_sentiment) : bloque
+# les NOUVELLES entrées sur un symbole dont les news récentes (API News
+# officielle Alpaca, pas de scraping de forums/réseaux sociaux) sont
+# majoritairement négatives. Ne s'applique qu'en trading live pour l'instant
+# (aucune donnée de news historique alignée n'est encore branchée au
+# backtest, voir la docstring du module).
+news_sentiment:
+  enabled: false # désactivé par défaut : à activer une fois validé manuellement sur quelques cycles en dry-run
+  lookback_hours: 48
+  # Score dans [-1, 1] ; bloque l'entrée si le score calculé est en dessous.
+  block_threshold: -0.3
+  # N'applique le filtre que s'il y a au moins ce nombre d'articles récents
+  # (évite de bloquer une entrée sur la base d'un seul titre isolé).
+  min_articles: 2

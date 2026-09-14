@@ -11,7 +11,11 @@ exactement les mêmes briques que le trading live.
   mêmes symboles, chacune avec un poids configurable ; leurs signaux sont
   combinés par un allocateur.
   - `sma_crossover` : suivi de tendance (croisement de moyennes mobiles)
-  - `rsi_mean_reversion` : retour à la moyenne (RSI survente/surachat)
+  - `rsi_mean_reversion` : retour à la moyenne (RSI survente/surachat), avec
+    un filtre de tendance optionnel (`trend_filter_window`, SMA 200 par
+    défaut) qui n'achète un creux de RSI que si le prix est déjà au-dessus de
+    cette moyenne longue — pour éviter d'acheter des creux en pleine tendance
+    baissière ("couteau qui tombe")
   - `momentum_breakout` : breakout de momentum (canal de Donchian)
   - `relative_strength` : rotation sectorielle / force relative — classe les
     symboles de l'univers *entre eux* (plutôt que dans l'absolu) et ne reste
@@ -36,6 +40,19 @@ exactement les mêmes briques que le trading live.
     tendance baissière (sous sa SMA 200), pour limiter les pertes en marché
     baissier généralisé — le bot est long-only et sans ce filtre rien ne
     réduit l'exposition dans ce cas. Voir `config.yaml -> market.regime_filter`.
+  - **Filtre de volatilité** : réduit l'exposition quand un proxy négociable
+    de la volatilité de marché (VIXY par défaut) s'envole au-dessus de sa
+    moyenne mobile récente, signe d'un pic de stress — complémentaire au
+    filtre de régime (celui-ci réagit à la direction du marché, celui-là à
+    l'amplitude des mouvements récents, un choc pouvant survenir même en
+    tendance haussière). Désactivé par défaut, voir
+    `config.yaml -> market.volatility_filter`.
+  - **Filtre de sentiment de news** (live uniquement) : bloque les nouvelles
+    entrées sur un symbole dont les news récentes — récupérées via l'API News
+    officielle d'Alpaca, pas de scraping de forums/réseaux sociaux — sont
+    majoritairement négatives (score sous un seuil configurable, mots-clés
+    transparents et auditables plutôt qu'un modèle boîte noire). Désactivé
+    par défaut, voir `config.yaml -> news_sentiment`.
   - **Coupe-circuit de perte journalière** : bloque toute nouvelle entrée
     (ou augmentation de position) pour le reste de la séance si la perte du
     jour dépasse un seuil configurable ; se réinitialise à la séance suivante.
@@ -108,6 +125,22 @@ Affiche les métriques de performance (rendement total/annualisé, volatilité,
 Sharpe, max drawdown, taux de jours positifs), le nombre de sorties
 déclenchées par le stop suiveur, et signale si un coupe-circuit s'est
 déclenché pendant la période testée.
+
+### Walk-forward
+
+```bash
+python -m trading_bot walk-forward
+# fenêtres personnalisées (en jours calendaires) :
+python -m trading_bot walk-forward --train-days 365 --test-days 90
+```
+
+Découpe l'historique en fenêtres glissantes entraînement/test et ré-exécute
+le backtest sur chacune, pour vérifier que la performance tient dans le temps
+plutôt que sur une seule période choisie. Affiche le détail par fenêtre ainsi
+que les métriques cumulées sur toutes les fenêtres de test (hors échantillon
+uniquement). Ne fait pas de ré-optimisation de paramètres par fenêtre (les
+stratégies utilisent des paramètres fixes) : voir la docstring de
+`trading_bot.backtest.walk_forward` pour le détail de ce que ça valide.
 
 ### Paper trading
 
@@ -238,3 +271,15 @@ aux autres (voir le commentaire sur `defensive_rotation` dans
   par trade est individuel, pas agrégé en une cible de volatilité globale).
 - Le slippage est approximé par un pourcentage de commission fixe dans le
   backtest ; pas de modélisation de l'impact de marché.
+- Pas de crypto (BTC/USD, ETH/USD...) : Alpaca les trade sous un format de
+  symbole différent, avec un client de données distinct, et un marché ouvert
+  24/7 alors que tout le reste du bot (calendrier NYSE, coupe-circuit
+  journalier, buffer de clôture) suppose des séances avec horaires fixes. À
+  traiter comme un chantier à part plutôt qu'un simple ajout de symboles.
+- Le filtre de sentiment de news ne s'applique qu'au trading live : aucune
+  donnée de news historique alignée sur les dates de prix n'est encore
+  branchée au backtest (voir `trading_bot.data.news_sentiment`).
+- Le walk-forward (voir [Walk-forward](#walk-forward)) ré-exécute la même
+  config sur chaque fenêtre plutôt que de ré-optimiser les paramètres par
+  fenêtre : il valide la stabilité dans le temps, pas l'absence d'overfitting
+  sur le choix des paramètres eux-mêmes.

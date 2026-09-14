@@ -176,3 +176,83 @@ def test_run_once_cancels_native_stop_before_flattening_on_drawdown(monkeypatch,
 
     assert "stop-existing" in broker.cancelled_order_ids
     assert ("UP", 100.0, "sell") in broker.submitted_orders
+
+
+def make_two_symbol_config() -> AppConfig:
+    config = make_config()
+    config.symbols = ["UP", "UP2"]
+    return config
+
+
+def test_run_once_survives_stop_order_rejection_on_one_symbol(monkeypatch, uptrend_bars):
+    """Régression : Alpaca a déjà rejeté un ordre stop juste après le fill du
+    rebalancement ("potential wash trade detected"), ce qui faisait planter
+    tout le cycle avant de poser les stops des AUTRES positions et avant la
+    moindre sauvegarde d'état. Le rejet d'un symbole ne doit affecter que ce
+    symbole."""
+    config = make_two_symbol_config()
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(
+        engine_module,
+        "fetch_latest_bars",
+        lambda symbols, timeframe, credentials: {"UP": uptrend_bars, "UP2": uptrend_bars},
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda seconds: None)  # pas d'attente réelle en test
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    broker = FakeBroker(equity=100_000.0, positions={}, prices={"UP": last_price, "UP2": last_price})
+
+    real_submit = broker.submit_stop_order
+
+    def failing_submit(symbol, qty, side, stop_price):
+        if symbol == "UP":
+            raise RuntimeError("potential wash trade detected")
+        return real_submit(symbol, qty, side, stop_price)
+
+    broker.submit_stop_order = failing_submit
+
+    state = engine_module.run_once(config, broker, dry_run=False, state=LiveState())
+
+    # UP2 a bien reçu son stop natif malgré l'échec sur UP.
+    assert "UP2" in state.stop_order_ids
+    assert state.stop_order_ids["UP2"] in broker.stop_orders
+    # UP a échoué après plusieurs tentatives mais n'a pas fait planter le cycle.
+    assert "UP" not in state.stop_order_ids
+
+
+def test_run_once_renews_stop_order_on_new_trading_day_even_if_price_unchanged(monkeypatch, uptrend_bars):
+    """Les stops natifs sont posés en TimeInForce.DAY (obligatoire côté
+    Alpaca pour une quantité fractionnaire) : ils expirent donc à la clôture
+    et doivent être reposés à la séance suivante même si le prix du stop n'a
+    pas bougé, sinon la position se retrouve silencieusement sans protection."""
+    config = make_config()
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    qty = 100.0
+    broker = FakeBroker(
+        equity=100_000.0,
+        positions={"UP": Position(symbol="UP", qty=qty, market_value=qty * last_price, avg_entry_price=last_price)},
+        prices={"UP": last_price},
+    )
+    # Stop déjà posé hier, au même prix que celui recalculé aujourd'hui (le
+    # stop suiveur ne "ratchet" pas puisque le prix n'a pas bougé) : sans la
+    # logique d'expiration, `stop_moved` serait False et rien ne serait reposé.
+    from trading_bot.portfolio.stops import StopLevel
+
+    existing_stop = StopLevel(direction=1, stop_price=last_price * 0.85)
+    broker.stop_orders["stop-yesterday"] = {"symbol": "UP", "qty": qty, "side": "sell", "stop_price": existing_stop.stop_price}
+    state = LiveState(
+        trailing_stops={"UP": existing_stop},
+        stop_order_ids={"UP": "stop-yesterday"},
+        stop_order_dates={"UP": "2020-01-01"},  # une séance antérieure
+    )
+
+    new_state = engine_module.run_once(config, broker, dry_run=False, state=state)
+
+    # L'ancien ordre (expiré côté broker) a été annulé (best-effort) et un
+    # nouveau a été reposé pour la séance en cours, même sans mouvement de prix.
+    assert "stop-yesterday" in broker.cancelled_order_ids
+    assert new_state.stop_order_ids["UP"] != "stop-yesterday"
+    assert new_state.stop_order_dates["UP"] == pd.Timestamp.now(tz="UTC").date().isoformat()

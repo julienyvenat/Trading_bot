@@ -18,6 +18,23 @@ de suite, mais rien ne garantit qu'il soit déjà reflété au moment de cette
 relecture (pas d'attente bloquante du fill) : dans de rares cas, le stop du
 cycle pourrait porter sur la quantité d'avant l'ordre plutôt qu'après. Le
 cycle suivant corrige la situation (ratchet + remplacement du stop).
+
+Cette même course peut aussi faire rejeter transitoirement la pose du stop
+par Alpaca ("potential wash trade detected" juste après le fill d'un ordre de
+rebalancement, le temps que son carnet d'ordres interne se mette à jour) ;
+`_submit_stop_order` retente donc automatiquement quelques fois avec un court
+délai avant d'abandonner *ce symbole précis* : un rejet ne doit jamais faire
+échouer le cycle entier ni empêcher la pose des stops des autres positions.
+
+Autre contrainte Alpaca, structurelle celle-ci (vue en pratique lors du
+premier test en paper trading réel) : les ordres stop/stop_limit en quantité
+FRACTIONNAIRE ne sont acceptés qu'en `TimeInForce.DAY`, jamais `GTC` — or le
+dimensionnement basé sur l'ATR (`RiskManager`) produit quasi systématiquement
+des quantités fractionnaires. Chaque stop natif expire donc à la clôture de
+la séance où il a été posé (voir `AlpacaBroker.submit_stop_order`), et
+`state.stop_order_dates` (voir `trading_bot.state`) permet à `run_once` de le
+reposer à chaque nouvelle séance même quand son prix n'a pas bougé, plutôt
+que de laisser une position sans protection dès le lendemain.
 """
 
 from __future__ import annotations
@@ -26,8 +43,9 @@ import time
 
 import pandas as pd
 
-from trading_bot.config import AppConfig, load_alpaca_credentials
+from trading_bot.config import AlpacaCredentials, AppConfig, load_alpaca_credentials
 from trading_bot.data.market_data import fetch_latest_bars
+from trading_bot.data.news_sentiment import fetch_recent_sentiment
 from trading_bot.execution.alpaca_broker import AlpacaBroker
 from trading_bot.execution.broker_base import Broker
 from trading_bot.execution.rebalancer import execute_orders, plan_orders
@@ -39,6 +57,7 @@ from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, app
 from trading_bot.portfolio.regime import latest_regime_scale
 from trading_bot.portfolio.risk import RiskManager
 from trading_bot.portfolio.stops import StopLevel, update_stop
+from trading_bot.portfolio.volatility_filter import latest_volatility_scale
 from trading_bot.state import LiveState, load_state, save_state
 from trading_bot.strategies.registry import build_enabled_strategies
 
@@ -52,6 +71,7 @@ MAX_SLEEP_CHUNK_SECONDS = 1800
 def _cancel_stop_order(symbol: str, state: LiveState, broker: Broker, dry_run: bool) -> None:
     """Annule (best-effort) le stop natif existant d'un symbole, s'il y en a un."""
     order_id = state.stop_order_ids.pop(symbol, None)
+    state.stop_order_dates.pop(symbol, None)
     if order_id is None:
         return
     if dry_run:
@@ -60,13 +80,71 @@ def _cancel_stop_order(symbol: str, state: LiveState, broker: Broker, dry_run: b
     broker.cancel_order(order_id)
 
 
-def _submit_stop_order(symbol: str, qty: float, stop: StopLevel, state: LiveState, broker: Broker, dry_run: bool) -> None:
+# Nombre de tentatives et délai avant retry en cas de rejet transitoire par
+# Alpaca ("wash trade" faussement détecté juste après le fill d'un ordre
+# marché de rebalancement, le temps que le carnet d'ordres se mette à jour
+# côté broker — voir limite connue en tête de fichier).
+_STOP_ORDER_MAX_ATTEMPTS = 3
+_STOP_ORDER_RETRY_DELAY_SECONDS = 2.0
+
+
+def _submit_stop_order(
+    symbol: str, qty: float, stop: StopLevel, state: LiveState, broker: Broker, dry_run: bool, today_str: str
+) -> None:
     side = "sell" if stop.direction > 0 else "buy"
     if dry_run:
         logger.info("DRY-RUN STOP %s %s %.4f @ %.2f", side.upper(), symbol, abs(qty), stop.stop_price)
         return
-    order_id = broker.submit_stop_order(symbol, abs(qty), side, stop.stop_price)
-    state.stop_order_ids[symbol] = order_id
+
+    last_error: Exception | None = None
+    for attempt in range(1, _STOP_ORDER_MAX_ATTEMPTS + 1):
+        try:
+            order_id = broker.submit_stop_order(symbol, abs(qty), side, stop.stop_price)
+            state.stop_order_ids[symbol] = order_id
+            state.stop_order_dates[symbol] = today_str
+            return
+        except Exception as exc:  # noqa: BLE001 - on catégorise via retry, pas via type
+            last_error = exc
+            if attempt < _STOP_ORDER_MAX_ATTEMPTS:
+                logger.warning(
+                    "Échec de la pose du stop sur %s (tentative %d/%d), nouvelle tentative dans %.0fs : %s",
+                    symbol,
+                    attempt,
+                    _STOP_ORDER_MAX_ATTEMPTS,
+                    _STOP_ORDER_RETRY_DELAY_SECONDS,
+                    exc,
+                )
+                time.sleep(_STOP_ORDER_RETRY_DELAY_SECONDS)
+
+    # Toutes les tentatives ont échoué : on logue et on abandonne CE symbole
+    # sans interrompre le cycle (les autres positions doivent quand même
+    # récupérer leur stop). La position reste sans stop natif jusqu'au
+    # prochain cycle, qui retentera (stop_order_ids ne contient pas ce
+    # symbole, donc `stop_moved or symbol not in state.stop_order_ids` sera
+    # vrai et redéclenchera une tentative).
+    logger.error(
+        "Impossible de poser le stop natif sur %s après %d tentatives, position non protégée "
+        "jusqu'au prochain cycle : %s",
+        symbol,
+        _STOP_ORDER_MAX_ATTEMPTS,
+        last_error,
+    )
+
+
+def _fetch_filter_reference(
+    symbol: str,
+    data_by_symbol: dict[str, pd.DataFrame],
+    config: AppConfig,
+    credentials: AlpacaCredentials,
+) -> pd.DataFrame | None:
+    """Renvoie les bougies d'un symbole de référence utilisé par un filtre
+    (régime ou volatilité), en le récupérant séparément s'il n'est pas déjà
+    dans l'univers tradé (`config.symbols`) — ce symbole de référence n'a pas
+    besoin d'y figurer, voir `RegimeFilterConfig`/`VolatilityFilterConfig`."""
+    if symbol in data_by_symbol:
+        return data_by_symbol[symbol]
+    extra = fetch_latest_bars([symbol], config.timeframe, credentials)
+    return extra.get(symbol)
 
 
 def _close_all_positions(current_qty: dict[str, float], broker: Broker, dry_run: bool, reason: str) -> None:
@@ -118,9 +196,11 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
         if current_qty.get(symbol, 0.0) == 0.0:
             logger.info("Stop natif sur %s considéré exécuté (plus de position) : nettoyage de l'état.", symbol)
             state.stop_order_ids.pop(symbol, None)
+            state.stop_order_dates.pop(symbol, None)
             state.trailing_stops.pop(symbol, None)
 
     today = pd.Timestamp.now(tz="UTC").date()
+    today_str = today.isoformat()
     circuit_breaker = CircuitBreaker(config.risk)
     risk_state = state.risk_state or RiskState.initial(equity, today=today)
     risk_state = circuit_breaker.update(risk_state, equity, today)
@@ -153,11 +233,11 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
 
     regime_config = config.market.regime_filter
     if regime_config.enabled:
-        bench_df = data_by_symbol.get(regime_config.symbol)
+        bench_df = _fetch_filter_reference(regime_config.symbol, data_by_symbol, config, credentials)
         if bench_df is None:
             logger.warning(
-                "Filtre de régime activé pour %s mais ce symbole n'est pas dans l'univers configuré "
-                "(config.yaml -> universe.symbols) : filtre ignoré ce cycle.",
+                "Filtre de régime activé pour %s mais aucune donnée disponible pour ce symbole : "
+                "filtre ignoré ce cycle.",
                 regime_config.symbol,
             )
         else:
@@ -175,6 +255,38 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
                 for sym, exp in target_exposures.items()
             }
 
+    # Filtre de volatilité : complémentaire au filtre de régime ci-dessus
+    # (celui-ci réagit à l'amplitude des mouvements récents plutôt qu'à la
+    # direction du marché, voir `trading_bot.portfolio.volatility_filter`).
+    volatility_config = config.market.volatility_filter
+    if volatility_config.enabled:
+        vol_df = _fetch_filter_reference(volatility_config.symbol, data_by_symbol, config, credentials)
+        if vol_df is None:
+            logger.warning(
+                "Filtre de volatilité activé pour %s mais aucune donnée disponible pour ce symbole : "
+                "filtre ignoré ce cycle.",
+                volatility_config.symbol,
+            )
+        else:
+            vol_scale = latest_volatility_scale(
+                vol_df["close"],
+                volatility_config.sma_window,
+                volatility_config.spike_threshold_pct,
+                volatility_config.spike_exposure_scale,
+            )
+            if vol_scale < 1.0:
+                logger.warning(
+                    "Filtre de volatilité : pic détecté sur %s, expositions réduites d'un facteur %.2f "
+                    "(hors symboles exemptés : %s).",
+                    volatility_config.symbol,
+                    vol_scale,
+                    ", ".join(volatility_config.exempt_symbols) or "aucun",
+                )
+            target_exposures = {
+                sym: (exp if sym in volatility_config.exempt_symbols else exp * vol_scale)
+                for sym, exp in target_exposures.items()
+            }
+
     logger.info("Expositions cibles : %s", {k: round(v, 3) for k, v in target_exposures.items()})
 
     # 3) Dimensionnement du risque -> coupe-circuit journalier -> ordres.
@@ -186,6 +298,35 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
         for sym in config.symbols
     }
     sizings = apply_halt(sizings, current_weights, risk_state)
+
+    # 3bis) Filtre de sentiment de news : bloque uniquement les NOUVELLES
+    # entrées (symbole actuellement flat) dont les news récentes sont
+    # majoritairement négatives — ne s'applique jamais à une position déjà
+    # ouverte (jamais de blocage d'une réduction de risque). Voir
+    # `trading_bot.data.news_sentiment` pour la justification de l'approche
+    # (API officielle Alpaca, pas de scraping).
+    news_config = config.news_sentiment
+    if news_config.enabled:
+        for symbol in list(sizings):
+            sizing = sizings[symbol]
+            is_new_entry = current_qty.get(symbol, 0.0) == 0.0 and abs(sizing.target_weight) > 1e-9
+            if not is_new_entry:
+                continue
+            try:
+                sentiment = fetch_recent_sentiment(symbol, credentials, news_config.lookback_hours)
+            except Exception:  # noqa: BLE001 - une panne de l'API news ne doit jamais bloquer tout le cycle
+                logger.exception(
+                    "Impossible de récupérer le sentiment de news pour %s : entrée autorisée par défaut.", symbol
+                )
+                continue
+            if sentiment.num_articles >= news_config.min_articles and sentiment.score <= news_config.block_threshold:
+                logger.warning(
+                    "Filtre de sentiment : nouvelle entrée sur %s bloquée (score %.2f sur %d articles récents).",
+                    symbol,
+                    sentiment.score,
+                    sentiment.num_articles,
+                )
+                sizings.pop(symbol, None)
 
     orders = plan_orders(sizings, current_qty, equity, last_prices)
 
@@ -238,9 +379,13 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
             continue
 
         stop_moved = previous_stop is None or previous_stop.stop_price != new_stop.stop_price
-        if stop_moved or symbol not in state.stop_order_ids:
+        # Un ordre stop natif posé un jour de séance antérieur est déjà expiré
+        # côté broker (TimeInForce.DAY, voir AlpacaBroker.submit_stop_order) :
+        # il faut le reposer même si son prix n'a pas bougé depuis.
+        stop_expired = state.stop_order_dates.get(symbol) != today_str
+        if stop_moved or symbol not in state.stop_order_ids or stop_expired:
             _cancel_stop_order(symbol, state, broker, dry_run)
-            _submit_stop_order(symbol, qty, new_stop, state, broker, dry_run)
+            _submit_stop_order(symbol, qty, new_stop, state, broker, dry_run, today_str)
 
     return state
 

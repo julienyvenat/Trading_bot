@@ -19,6 +19,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
     original = LiveState(
         trailing_stops={"AAPL": StopLevel(direction=1, stop_price=150.0)},
         stop_order_ids={"AAPL": "abc-123"},
+        stop_order_dates={"AAPL": "2024-06-01"},
         risk_state=RiskState(
             equity_peak=110_000,
             session_start_equity=105_000,
@@ -34,6 +35,9 @@ def test_save_then_load_roundtrip(tmp_path: Path):
     loaded = load_state(path)
     assert loaded.trailing_stops["AAPL"] == StopLevel(direction=1, stop_price=150.0)
     assert loaded.stop_order_ids == {"AAPL": "abc-123"}
+    # Nécessaire pour savoir qu'un stop DAY posé la veille a expiré côté
+    # broker et doit être reposé (voir trading_bot.live.engine).
+    assert loaded.stop_order_dates == {"AAPL": "2024-06-01"}
     assert loaded.risk_state == original.risk_state
 
 

@@ -5,7 +5,13 @@ Trois choses doivent survivre à un redémarrage du bot :
     d'un stop plus large que ce qu'il devrait être) ;
   - les identifiants des ordres stop natifs posés chez le broker pour chaque
     position (nécessaire pour pouvoir les annuler/remplacer au bon moment,
-    voir `trading_bot.live.engine`) ;
+    voir `trading_bot.live.engine`), ainsi que la date de séance à laquelle
+    chacun a été posé (`stop_order_dates`) : Alpaca n'accepte les ordres
+    stop/stop_limit en quantité fractionnaire qu'en `TimeInForce.DAY` (jamais
+    `GTC`), donc chaque ordre stop natif expire à la clôture et doit être
+    reposé à chaque nouvelle séance, même si son prix n'a pas bougé — sans
+    cette date, le bot croirait un stop de la veille toujours actif alors
+    qu'il a expiré côté broker, laissant la position sans protection ;
   - l'état des coupe-circuits, en particulier le coupe-circuit de drawdown,
     qui est volontairement "sticky" : si le bot crashe puis redémarre après
     l'avoir déclenché, il DOIT rester arrêté plutôt que de repartir comme si
@@ -29,6 +35,13 @@ class LiveState:
     # chaque symbole ayant une position ouverte. Absent si aucun ordre stop
     # natif n'est actuellement posé (ex: dry-run, ou pas encore soumis).
     stop_order_ids: dict[str, str] = field(default_factory=dict)
+    # Date (ISO, "YYYY-MM-DD") de la séance à laquelle le stop natif de
+    # chaque symbole a été (re)posé. Ces ordres étant en `TimeInForce.DAY`
+    # (voir `AlpacaBroker.submit_stop_order`), un id présent dans
+    # `stop_order_ids` mais dont la date ici est antérieure à la séance en
+    # cours correspond à un ordre déjà expiré côté broker : `run_once` doit
+    # le reposer même si le prix du stop n'a pas changé.
+    stop_order_dates: dict[str, str] = field(default_factory=dict)
     risk_state: RiskState | None = None
 
     def to_dict(self) -> dict:
@@ -38,6 +51,7 @@ class LiveState:
                 for symbol, stop in self.trailing_stops.items()
             },
             "stop_order_ids": dict(self.stop_order_ids),
+            "stop_order_dates": dict(self.stop_order_dates),
             "risk_state": self.risk_state.to_dict() if self.risk_state else None,
         }
 
@@ -48,8 +62,14 @@ class LiveState:
             for symbol, v in data.get("trailing_stops", {}).items()
         }
         stop_order_ids = dict(data.get("stop_order_ids", {}))
+        stop_order_dates = dict(data.get("stop_order_dates", {}))
         risk_state = RiskState.from_dict(data["risk_state"]) if data.get("risk_state") else None
-        return cls(trailing_stops=stops, stop_order_ids=stop_order_ids, risk_state=risk_state)
+        return cls(
+            trailing_stops=stops,
+            stop_order_ids=stop_order_ids,
+            stop_order_dates=stop_order_dates,
+            risk_state=risk_state,
+        )
 
 
 def load_state(path: str | Path) -> LiveState:
