@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from trading_bot.config import StrategyConfig
 from trading_bot.strategies.base import Strategy
+from trading_bot.strategies.bollinger_scalping import BollingerScalpingStrategy
 from trading_bot.strategies.defensive_rotation import DefensiveRotationStrategy
 from trading_bot.strategies.momentum_breakout import MomentumBreakoutStrategy
 from trading_bot.strategies.relative_strength import RelativeStrengthStrategy
@@ -16,6 +17,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     MomentumBreakoutStrategy.name: MomentumBreakoutStrategy,
     RelativeStrengthStrategy.name: RelativeStrengthStrategy,
     DefensiveRotationStrategy.name: DefensiveRotationStrategy,
+    BollingerScalpingStrategy.name: BollingerScalpingStrategy,
 }
 
 

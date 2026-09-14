@@ -46,3 +46,17 @@ def rolling_max(series: pd.Series, window: int) -> pd.Series:
 
 def rolling_min(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, min_periods=window).min()
+
+
+def bollinger_bands(series: pd.Series, window: int, num_std: float = 2.0) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Bandes de Bollinger : (bande médiane, bande supérieure, bande inférieure).
+
+    `window` est un nombre de BOUGIES, pas de jours : sur des bougies
+    intraday (voir `trading_bot.strategies.bollinger_scalping`), une fenêtre
+    de 20 correspond à 20 bougies (ex: 100 minutes en 5 min), pas à 20 jours.
+    """
+    mid = sma(series, window)
+    std = series.rolling(window=window, min_periods=window).std(ddof=0)
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+    return mid, upper, lower

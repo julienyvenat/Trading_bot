@@ -4,6 +4,46 @@ from __future__ import annotations
 
 import pandas as pd
 
+from trading_bot.logger import get_logger
+
+logger = get_logger()
+
+# Correspondance entre `universe.timeframe` (config.yaml, même convention que
+# côté live/Alpaca, voir `trading_bot.data.market_data`) et le code
+# d'intervalle attendu par yfinance.
+_YFINANCE_INTERVAL_MAP = {
+    "1Day": "1d",
+    "1Hour": "1h",
+    "30Min": "30m",
+    "15Min": "15m",
+    "5Min": "5m",
+    "1Min": "1m",
+}
+
+# Profondeur d'historique max connue de yfinance par granularité intraday
+# (constatée empiriquement, sujette à changer côté Yahoo Finance sans
+# préavis) : au-delà, yfinance renvoie silencieusement moins de données que
+# demandé plutôt que d'échouer explicitement — d'où l'avertissement dans
+# `fetch_historical_data` plutôt qu'une erreur bloquante.
+_YFINANCE_MAX_LOOKBACK_DAYS = {
+    "1m": 7,
+    "5m": 60,
+    "15m": 60,
+    "30m": 60,
+    "1h": 730,
+}
+
+
+def yfinance_interval_for_timeframe(timeframe: str) -> str:
+    """Convertit un `universe.timeframe` de config.yaml (ex: '5Min') en code
+    d'intervalle yfinance (ex: '5m')."""
+    if timeframe not in _YFINANCE_INTERVAL_MAP:
+        raise ValueError(
+            f"Timeframe '{timeframe}' non reconnu pour le backtest. Valeurs supportées : "
+            f"{', '.join(_YFINANCE_INTERVAL_MAP)}."
+        )
+    return _YFINANCE_INTERVAL_MAP[timeframe]
+
 
 def fetch_historical_data(
     symbols: list[str],
@@ -17,6 +57,19 @@ def fetch_historical_data(
     ["open", "high", "low", "close", "volume"], indexées par date (tz-naive).
     """
     import yfinance as yf  # import différé : dépendance réseau, inutile pour les tests unitaires
+
+    max_lookback = _YFINANCE_MAX_LOOKBACK_DAYS.get(interval)
+    if max_lookback is not None and start_date:
+        requested_days = (pd.Timestamp.now() - pd.Timestamp(start_date)).days
+        if requested_days > max_lookback:
+            logger.warning(
+                "Intervalle '%s' demandé depuis %d jours, mais yfinance ne garantit généralement "
+                "que %d jours d'historique à cette granularité : les données reçues risquent d'être "
+                "tronquées silencieusement (pas d'erreur côté yfinance).",
+                interval,
+                requested_days,
+                max_lookback,
+            )
 
     data: dict[str, pd.DataFrame] = {}
     for symbol in symbols:

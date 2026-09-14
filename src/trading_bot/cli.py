@@ -27,6 +27,20 @@ def _build_param_grids(config: AppConfig) -> list:
     ]
 
 
+def _fetch_data(config: AppConfig, symbols: list[str]) -> dict:
+    """Télécharge l'historique (yfinance) pour `symbols`, à la granularité
+    dérivée de `universe.timeframe` (même convention que côté live/Alpaca,
+    voir `trading_bot.data.market_data`) : '1Day' -> quotidien (comportement
+    historique, inchangé), '5Min'/'15Min'/... -> intraday pour une stratégie
+    de scalping comme `bollinger_scalping`."""
+    from trading_bot.data.historical import fetch_historical_data, yfinance_interval_for_timeframe
+
+    interval = yfinance_interval_for_timeframe(config.timeframe)
+    return fetch_historical_data(
+        symbols, start_date=config.backtest.start_date, end_date=config.backtest.end_date, interval=interval
+    )
+
+
 def _fetch_filter_benchmarks(config: AppConfig, data_by_symbol: dict, logger) -> tuple:
     """Récupère, pour le backtest et le walk-forward, les données des
     symboles de référence utilisés par les filtres de régime et de
@@ -35,14 +49,10 @@ def _fetch_filter_benchmarks(config: AppConfig, data_by_symbol: dict, logger) ->
     besoin de figurer dans `universe.symbols`, ils ne servent qu'à calculer
     un facteur d'exposition, jamais tradés pour eux-mêmes via ce mécanisme).
     """
-    from trading_bot.data.historical import fetch_historical_data
-
     benchmark_df = None
     regime_config = config.market.regime_filter
     if regime_config.enabled and regime_config.symbol not in data_by_symbol:
-        bench_data = fetch_historical_data(
-            [regime_config.symbol], start_date=config.backtest.start_date, end_date=config.backtest.end_date
-        )
+        bench_data = _fetch_data(config, [regime_config.symbol])
         benchmark_df = bench_data.get(regime_config.symbol)
         if benchmark_df is None:
             logger.warning(
@@ -53,9 +63,7 @@ def _fetch_filter_benchmarks(config: AppConfig, data_by_symbol: dict, logger) ->
     volatility_benchmark_df = None
     volatility_config = config.market.volatility_filter
     if volatility_config.enabled and volatility_config.symbol not in data_by_symbol:
-        vol_data = fetch_historical_data(
-            [volatility_config.symbol], start_date=config.backtest.start_date, end_date=config.backtest.end_date
-        )
+        vol_data = _fetch_data(config, [volatility_config.symbol])
         volatility_benchmark_df = vol_data.get(volatility_config.symbol)
         if volatility_benchmark_df is None:
             logger.warning(
@@ -68,17 +76,17 @@ def _fetch_filter_benchmarks(config: AppConfig, data_by_symbol: dict, logger) ->
 
 def cmd_backtest(args: argparse.Namespace) -> None:
     from trading_bot.backtest.engine import run_backtest
-    from trading_bot.data.historical import fetch_historical_data
 
     logger = setup_logging()
     config = load_config(args.config)
 
-    logger.info("Téléchargement des données historiques (%s -> %s)...", config.backtest.start_date, config.backtest.end_date or "aujourd'hui")
-    data_by_symbol = fetch_historical_data(
-        config.symbols,
-        start_date=config.backtest.start_date,
-        end_date=config.backtest.end_date,
+    logger.info(
+        "Téléchargement des données historiques (%s -> %s, granularité %s)...",
+        config.backtest.start_date,
+        config.backtest.end_date or "aujourd'hui",
+        config.timeframe,
     )
+    data_by_symbol = _fetch_data(config, config.symbols)
     if not data_by_symbol:
         logger.error("Aucune donnée téléchargée. Vérifie les symboles et ta connexion réseau.")
         sys.exit(1)
@@ -114,19 +122,17 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
 def cmd_walk_forward(args: argparse.Namespace) -> None:
     from trading_bot.backtest.walk_forward import run_walk_forward
-    from trading_bot.data.historical import fetch_historical_data
 
     logger = setup_logging()
     config = load_config(args.config)
 
     logger.info(
-        "Téléchargement des données historiques (%s -> %s)...",
+        "Téléchargement des données historiques (%s -> %s, granularité %s)...",
         config.backtest.start_date,
         config.backtest.end_date or "aujourd'hui",
+        config.timeframe,
     )
-    data_by_symbol = fetch_historical_data(
-        config.symbols, start_date=config.backtest.start_date, end_date=config.backtest.end_date
-    )
+    data_by_symbol = _fetch_data(config, config.symbols)
     if not data_by_symbol:
         logger.error("Aucune donnée téléchargée. Vérifie les symboles et ta connexion réseau.")
         sys.exit(1)
@@ -173,7 +179,6 @@ def cmd_walk_forward(args: argparse.Namespace) -> None:
 
 def cmd_optimize(args: argparse.Namespace) -> None:
     from trading_bot.backtest.optimizer import optimize
-    from trading_bot.data.historical import fetch_historical_data
 
     logger = setup_logging()
     config = load_config(args.config)
@@ -187,13 +192,12 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     logger.info(
-        "Téléchargement des données historiques (%s -> %s)...",
+        "Téléchargement des données historiques (%s -> %s, granularité %s)...",
         config.backtest.start_date,
         config.backtest.end_date or "aujourd'hui",
+        config.timeframe,
     )
-    data_by_symbol = fetch_historical_data(
-        config.symbols, start_date=config.backtest.start_date, end_date=config.backtest.end_date
-    )
+    data_by_symbol = _fetch_data(config, config.symbols)
     if not data_by_symbol:
         logger.error("Aucune donnée téléchargée. Vérifie les symboles et ta connexion réseau.")
         sys.exit(1)

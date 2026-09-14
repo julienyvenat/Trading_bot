@@ -183,7 +183,14 @@ def run_backtest(
     calendar = MarketCalendar(config.market.calendar)
     trading_days = calendar.trading_days(start, end)
     in_range = (close_df.index >= start) & (close_df.index <= end)
-    dates = close_df.index[in_range & close_df.index.isin(trading_days)]
+    # Comparaison par DATE (jour de séance), pas par horodatage exact : des
+    # bougies journalières tombent déjà à minuit (comportement inchangé),
+    # mais des bougies intraday (5min, 1h...) ne tombent jamais exactement à
+    # minuit — les comparer à `trading_days` telles quelles éliminerait
+    # silencieusement la quasi-totalité des données. `.normalize()` ramène
+    # chaque horodatage à sa date pour ne filtrer que sur les jours de
+    # bourse valides, quelle que soit la granularité des bougies.
+    dates = close_df.index[in_range & close_df.index.normalize().isin(trading_days)]
 
     missing = in_range.sum() - len(dates)
     if missing > 0:

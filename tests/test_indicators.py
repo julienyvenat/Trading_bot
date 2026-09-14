@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from trading_bot.indicators import atr, rsi, sma
+from trading_bot.indicators import atr, bollinger_bands, rsi, sma
 
 
 def test_sma_basic():
@@ -29,3 +29,29 @@ def test_rsi_strong_uptrend_is_high(trending_up_df):
 def test_atr_non_negative(trending_up_df):
     values = atr(trending_up_df, window=14).dropna()
     assert (values >= 0).all()
+
+
+def test_bollinger_bands_are_ordered_and_centered():
+    rng = np.random.default_rng(0)
+    series = pd.Series(100 + np.cumsum(rng.normal(size=100)))
+    mid, upper, lower = bollinger_bands(series, window=20, num_std=2.0)
+
+    valid = mid.notna()
+    assert (upper[valid] >= mid[valid]).all()
+    assert (lower[valid] <= mid[valid]).all()
+
+
+def test_bollinger_bands_flat_series_has_zero_width():
+    series = pd.Series([50.0] * 30)
+    mid, upper, lower = bollinger_bands(series, window=10, num_std=2.0)
+    valid = mid.notna()
+    assert np.allclose(upper[valid], mid[valid])
+    assert np.allclose(lower[valid], mid[valid])
+
+
+def test_bollinger_bands_warmup_is_nan():
+    series = pd.Series(range(5))
+    mid, upper, lower = bollinger_bands(series, window=20, num_std=2.0)
+    assert mid.isna().all()
+    assert upper.isna().all()
+    assert lower.isna().all()

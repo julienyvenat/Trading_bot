@@ -25,7 +25,14 @@ exactement les mêmes briques que le trading live.
     corrélé aux actions (or via GLD par défaut) quand le marché large est en
     tendance baissière, pour une diversification de classe d'actif plutôt que
     de signal.
+  - `bollinger_scalping` : retour à la moyenne sur bandes de Bollinger,
+    pensée pour de l'**intraday** (bougies 5 min...) plutôt que du swing
+    quotidien — voir [Scalping / intraday](#scalping--intraday).
   - Facile d'en ajouter de nouvelles (voir [Ajouter une stratégie](#ajouter-une-stratégie)).
+- **Granularité configurable** (`universe.timeframe`) : quotidien par défaut
+  (`1Day`), ou intraday (`1Hour`, `30Min`, `15Min`, `5Min`, `1Min`) pour du
+  scalping — le même moteur event-driven tourne à l'identique quelle que
+  soit la granularité (voir [Scalping / intraday](#scalping--intraday)).
 - **Gestion du risque** :
   - Dimensionnement des positions basé sur l'ATR (risque max par trade), poids
     max par position, exposition brute max du portefeuille, nombre max de
@@ -198,6 +205,41 @@ d'en tester des grandes. Cette recherche optimise sur UNE période fixe (pas
 de garantie hors échantillon) — valide toujours la combinaison retenue via
 `walk-forward --optimize` avant de t'y fier.
 
+### Scalping / intraday
+
+Le bot supporte des bougies intraday (`universe.timeframe: "5Min"`, `"15Min"`,
+`"1Hour"`...) en plus du quotidien par défaut — même moteur event-driven,
+mêmes commandes (`backtest`, `optimize`, `walk-forward`, `paper`), juste une
+granularité différente. Un exemple complet est fourni :
+[`config/config_scalping.example.yaml`](config/config_scalping.example.yaml)
+(stratégie `bollinger_scalping`, bougies 5 min, stops resserrés, grille
+d'optimisation pré-remplie).
+
+```bash
+cp config/config_scalping.example.yaml config/config_scalping.yaml
+# adapter backtest.start_date : yfinance ne garantit qu'un historique limité
+# à cette granularité (~60 jours glissants pour du 5 min, 7 jours pour du 1 min)
+
+python -m trading_bot backtest --config config/config_scalping.yaml
+python -m trading_bot optimize --config config/config_scalping.yaml
+python -m trading_bot walk-forward --config config/config_scalping.yaml --train-days 15 --test-days 5 --optimize
+```
+
+⚠️ À lire avant d'aller plus loin (détaillé en commentaire dans le fichier
+d'exemple) :
+- `backtest.commission_pct` (5 bps, calibré pour du swing quotidien)
+  sous-estime probablement les coûts réels du scalping (spread bid-ask,
+  slippage à haute fréquence) — les résultats de backtest sont optimistes
+  tant que ce paramètre n'est pas révisé à la hausse.
+- Contrainte réglementaire US : un compte sur marge de moins de 25 000 $
+  qui fait 4 day trades ou plus en 5 jours ouvrés est classé *Pattern Day
+  Trader* et se retrouve bloqué par le broker — le scalping en fait un
+  usage intensif par construction.
+- Les autres stratégies (`sma_crossover`, `rsi_mean_reversion`,
+  `momentum_breakout`) sont désactivées dans l'exemple : leurs fenêtres ont
+  été calibrées en JOURS pour du swing, pas en bougies pour de l'intraday —
+  les réactiver sans les retuner via `optimize` n'a pas de sens.
+
 ### Paper trading
 
 ```bash
@@ -261,6 +303,7 @@ src/trading_bot/
     sma_crossover.py, rsi_mean_reversion.py, momentum_breakout.py
     relative_strength.py  # rotation sectorielle / force relative (cross-sectionnelle)
     defensive_rotation.py # rotation vers un actif défensif (cross-sectionnelle)
+    bollinger_scalping.py  # retour à la moyenne intraday (scalping)
     registry.py           # fabrique de stratégies à partir de la config
   portfolio/
     allocator.py          # combine les signaux de plusieurs stratégies
@@ -362,3 +405,17 @@ aux autres (voir le commentaire sur `defensive_rotation` dans
   pratique, mais volontairement pas implémenté pour l'instant (voir
   `trading_bot.backtest.optimizer`) pour ne jamais risquer un écart entre le
   résultat affiché et ce qui tournerait réellement en live.
+- Le scalping/intraday (voir [Scalping / intraday](#scalping--intraday))
+  n'a qu'une seule stratégie dédiée (`bollinger_scalping`) pour l'instant ;
+  les autres restent calibrées pour du swing quotidien. yfinance limite en
+  outre l'historique disponible aux granularités fines (~60 jours pour du
+  5 min, 7 jours pour du 1 min) : `fetch_historical_data` avertit si
+  `backtest.start_date` dépasse cette limite connue, mais ne la fait pas
+  respecter automatiquement (yfinance renvoie alors moins de données que
+  demandé, silencieusement).
+- Le compte de commission (5 bps) et le modèle de fill (prix d'ouverture de
+  la bougie suivante, voir `trading_bot.backtest.engine`) n'ont pas été
+  révisés spécifiquement pour l'intraday : ils sous-estiment probablement
+  les coûts réels du scalping (spread bid-ask, slippage à haute fréquence),
+  qui pèsent proportionnellement bien plus sur des gains visés petits et
+  fréquents qu'en swing quotidien.

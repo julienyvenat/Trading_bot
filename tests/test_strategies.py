@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+
+from trading_bot.strategies.bollinger_scalping import BollingerScalpingStrategy
 from trading_bot.strategies.defensive_rotation import DefensiveRotationStrategy
 from trading_bot.strategies.momentum_breakout import MomentumBreakoutStrategy
 from trading_bot.strategies.relative_strength import RelativeStrengthStrategy
@@ -99,3 +103,60 @@ def test_defensive_rotation_flat_when_benchmark_bullish(trending_up_df, flat_df)
 def test_defensive_rotation_neutral_when_symbols_missing_from_universe():
     strategy = DefensiveRotationStrategy(defensive_symbol="TLT", benchmark_symbol="SPY")
     assert strategy.generate_universe_signals({}) is None
+
+
+def _make_intraday_df(prices, freq: str = "5min") -> pd.DataFrame:
+    index = pd.date_range("2024-01-01 09:30", periods=len(prices), freq=freq)
+    close = pd.Series(prices, index=index)
+    return pd.DataFrame(
+        {
+            "open": close.shift(1).fillna(close.iloc[0]),
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "volume": 10_000,
+        }
+    )
+
+
+def test_bollinger_scalping_enters_on_dip_below_lower_band():
+    # Plat puis chute nette d'une bougie : doit passer sous la bande
+    # inférieure et déclencher une entrée.
+    flat = np.full(30, 100.0)
+    dip = np.array([90.0])
+    prices = np.concatenate([flat, dip])
+    df = _make_intraday_df(prices)
+
+    strategy = BollingerScalpingStrategy(window=20, num_std=2.0)
+    assert strategy.latest_signal(df) == 1.0
+
+
+def test_bollinger_scalping_exits_once_price_returns_to_mid_band():
+    flat = np.full(30, 100.0)
+    dip = np.array([90.0])
+    recovery = np.full(5, 100.0)  # retour à la moyenne : doit déclencher la sortie
+    prices = np.concatenate([flat, dip, recovery])
+    df = _make_intraday_df(prices)
+
+    strategy = BollingerScalpingStrategy(window=20, num_std=2.0)
+    assert strategy.latest_signal(df) == 0.0
+
+
+def test_bollinger_scalping_flat_market_never_enters():
+    df = _make_intraday_df(np.full(60, 100.0))
+    strategy = BollingerScalpingStrategy(window=20, num_std=2.0)
+    signals = strategy.generate_signals(df)
+    assert (signals == 0.0).all()
+
+
+def test_bollinger_scalping_min_band_width_blocks_entry_on_low_volatility():
+    # Légère baisse suffisante pour passer sous une bande étroite (faible
+    # volatilité), mais le filtre `min_band_width_pct` élevé doit bloquer
+    # l'entrée malgré tout.
+    flat = 100 + np.sin(np.linspace(0, 3, 30)) * 0.05
+    dip = np.array([flat[-1] - 0.2])
+    prices = np.concatenate([flat, dip])
+    df = _make_intraday_df(prices)
+
+    strategy = BollingerScalpingStrategy(window=20, num_std=2.0, min_band_width_pct=0.5)
+    assert strategy.latest_signal(df) == 0.0
