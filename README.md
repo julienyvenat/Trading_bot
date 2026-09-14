@@ -13,6 +13,14 @@ exactement les mêmes briques que le trading live.
   - `sma_crossover` : suivi de tendance (croisement de moyennes mobiles)
   - `rsi_mean_reversion` : retour à la moyenne (RSI survente/surachat)
   - `momentum_breakout` : breakout de momentum (canal de Donchian)
+  - `relative_strength` : rotation sectorielle / force relative — classe les
+    symboles de l'univers *entre eux* (plutôt que dans l'absolu) et ne reste
+    investi que sur les plus forts, pour une vraie diversification de
+    mécanisme par rapport aux trois stratégies ci-dessus.
+  - `defensive_rotation` : rotation défensive — passe sur un actif peu
+    corrélé aux actions (or via GLD par défaut) quand le marché large est en
+    tendance baissière, pour une diversification de classe d'actif plutôt que
+    de signal.
   - Facile d'en ajouter de nouvelles (voir [Ajouter une stratégie](#ajouter-une-stratégie)).
 - **Gestion du risque** :
   - Dimensionnement des positions basé sur l'ATR (risque max par trade), poids
@@ -162,6 +170,8 @@ src/trading_bot/
   strategies/
     base.py              # classe abstraite Strategy
     sma_crossover.py, rsi_mean_reversion.py, momentum_breakout.py
+    relative_strength.py  # rotation sectorielle / force relative (cross-sectionnelle)
+    defensive_rotation.py # rotation vers un actif défensif (cross-sectionnelle)
     registry.py           # fabrique de stratégies à partir de la config
   portfolio/
     allocator.py          # combine les signaux de plusieurs stratégies
@@ -185,7 +195,15 @@ src/trading_bot/
 
 1. Crée une classe héritant de `trading_bot.strategies.base.Strategy` et
    implémente `generate_signals(df) -> pd.Series` (valeurs dans `[-1, 1]`,
-   vectorisé sur tout l'historique).
+   vectorisé sur tout l'historique). C'est le cas classique : la stratégie
+   juge chaque symbole indépendamment, à partir de son seul historique.
+   - Si ta stratégie a besoin de comparer les symboles entre eux (rotation
+     sectorielle...) ou de réagir au prix d'un *autre* symbole (rotation
+     défensive pilotée par un benchmark...), surcharge plutôt
+     `generate_universe_signals(data_by_symbol) -> dict[str, pd.Series]`
+     (voir `relative_strength.py` et `defensive_rotation.py` comme exemples) :
+     l'allocateur l'appellera une seule fois avec tout l'univers au lieu
+     d'appeler `generate_signals` symbole par symbole.
 2. Enregistre-la dans `trading_bot/strategies/registry.py` via
    `register_strategy(MaStrategie)`.
 3. Ajoute une entrée dans `config/config.yaml` sous `strategies:` avec son
@@ -193,6 +211,16 @@ src/trading_bot/
 
 Aucune autre modification n'est nécessaire : elle sera automatiquement prise
 en compte en backtest comme en live.
+
+**Diversifier plutôt qu'empiler** : ajouter une énième stratégie qui réagit au
+même type de signal (tendance/momentum sur prix) que les stratégies
+existantes n'apporte souvent pas de vraie diversification — elle vote juste
+une fois de plus dans le même sens la plupart du temps. Vérifie sa
+contribution *isolée* (l'activer seule dans `config.yaml` et comparer) avant
+de l'ajouter au mélange à poids plein ; une stratégie d'appoint (couverture,
+filtre défensif...) mérite souvent un poids réduit plutôt qu'un poids égal
+aux autres (voir le commentaire sur `defensive_rotation` dans
+`config/config.yaml`).
 
 ## Limites connues / pistes d'amélioration
 

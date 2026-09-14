@@ -37,6 +37,20 @@ class Strategy(ABC):
         """
         raise NotImplementedError
 
+    def generate_universe_signals(self, data_by_symbol: dict[str, pd.DataFrame]) -> dict[str, pd.Series] | None:
+        """Optionnel : pour une stratégie *cross-sectionnelle* qui a besoin de
+        comparer les symboles entre eux (ex: rotation sectorielle/force
+        relative) ou de réagir au prix d'un *autre* symbole (ex: rotation
+        défensive pilotée par un indice de référence), calcule directement un
+        signal par symbole à partir de tout l'univers en une fois.
+
+        Renvoie `None` par défaut : une stratégie "classique" par symbole
+        (la majorité) n'a pas besoin de surcharger cette méthode, l'allocateur
+        utilisera alors `generate_signals` symbole par symbole comme
+        d'habitude.
+        """
+        return None
+
     def latest_signal(self, df: pd.DataFrame) -> float:
         """Renvoie le signal du dernier point disponible (utilisé en live)."""
         signals = self.generate_signals(df)

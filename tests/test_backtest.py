@@ -108,3 +108,24 @@ def test_regime_filter_reduces_exposure_in_bearish_regime(trending_up_df, trendi
     # celle-ci établie : le filtre coupe l'exposition à 0, donc bien moins de
     # gain capturé que sans filtre sur la même tendance haussière de UP.
     assert result_with_filter.equity_curve.iloc[-1] < result_without_filter.equity_curve.iloc[-1]
+
+
+def test_regime_filter_does_not_reduce_exempt_symbols(trending_up_df, trending_down_df):
+    """Un symbole exempté (ex: l'actif défensif d'une rotation défensive) ne
+    doit pas être réduit par le filtre de régime, même en régime baissier —
+    sinon la rotation défensive perd une grande partie de son intérêt."""
+    config_exempt = make_config()
+    config_exempt.market.regime_filter = RegimeFilterConfig(
+        enabled=True, symbol="BENCH", sma_window=20, bearish_exposure_scale=0.0, exempt_symbols=["UP"]
+    )
+    config_not_exempt = make_config()
+    config_not_exempt.market.regime_filter = RegimeFilterConfig(
+        enabled=True, symbol="BENCH", sma_window=20, bearish_exposure_scale=0.0
+    )
+
+    result_exempt = run_backtest(config_exempt, {"UP": trending_up_df}, benchmark_df=trending_down_df)
+    result_not_exempt = run_backtest(config_not_exempt, {"UP": trending_up_df}, benchmark_df=trending_down_df)
+
+    # UP est exempté : sa performance ne doit pas être amputée par le régime
+    # baissier de BENCH, contrairement au cas où il ne serait pas exempté.
+    assert result_exempt.equity_curve.iloc[-1] > result_not_exempt.equity_curve.iloc[-1]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from trading_bot.strategies.defensive_rotation import DefensiveRotationStrategy
 from trading_bot.strategies.momentum_breakout import MomentumBreakoutStrategy
+from trading_bot.strategies.relative_strength import RelativeStrengthStrategy
 from trading_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from trading_bot.strategies.sma_crossover import SmaCrossoverStrategy
 
@@ -41,3 +43,39 @@ def test_momentum_breakout_signal_bounded(trending_up_df):
     strategy = MomentumBreakoutStrategy(lookback_window=20, exit_window=10)
     signals = strategy.generate_signals(trending_up_df)
     assert signals.isin([0.0, 1.0]).all()
+
+
+def test_relative_strength_selects_top_performer(trending_up_df, flat_df):
+    strategy = RelativeStrengthStrategy(lookback_window=60, top_n=1)
+    signals = strategy.generate_universe_signals({"UP": trending_up_df, "FLAT": flat_df})
+
+    assert signals["UP"].iloc[-1] == 1.0
+    assert signals["FLAT"].iloc[-1] == 0.0
+
+
+def test_relative_strength_generate_signals_alone_is_neutral(trending_up_df):
+    """Appelée isolément (hors allocateur), sans comparaison possible avec
+    d'autres symboles, cette stratégie doit rester neutre plutôt que
+    d'inventer un signal absolu qui n'a pas de sens pour elle."""
+    strategy = RelativeStrengthStrategy()
+    signals = strategy.generate_signals(trending_up_df)
+    assert (signals == 0.0).all()
+
+
+def test_defensive_rotation_goes_long_when_benchmark_bearish(trending_down_df, flat_df):
+    strategy = DefensiveRotationStrategy(defensive_symbol="TLT", benchmark_symbol="SPY", sma_window=20)
+    signals = strategy.generate_universe_signals({"SPY": trending_down_df, "TLT": flat_df, "OTHER": flat_df})
+
+    assert signals["TLT"].iloc[-1] == 1.0
+    assert (signals["OTHER"] == 0.0).all()  # ne s'applique qu'au symbole défensif
+
+
+def test_defensive_rotation_flat_when_benchmark_bullish(trending_up_df, flat_df):
+    strategy = DefensiveRotationStrategy(defensive_symbol="TLT", benchmark_symbol="SPY", sma_window=20)
+    signals = strategy.generate_universe_signals({"SPY": trending_up_df, "TLT": flat_df})
+    assert signals["TLT"].iloc[-1] == 0.0
+
+
+def test_defensive_rotation_neutral_when_symbols_missing_from_universe():
+    strategy = DefensiveRotationStrategy(defensive_symbol="TLT", benchmark_symbol="SPY")
+    assert strategy.generate_universe_signals({}) is None

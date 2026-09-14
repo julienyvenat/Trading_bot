@@ -219,7 +219,8 @@ def run_backtest(
             exposure = series.loc[dt] if dt in series.index else None
             if exposure is None or pd.isna(exposure):
                 continue
-            exposure = float(exposure) * regime_scale
+            symbol_scale = 1.0 if symbol in regime_config.exempt_symbols else regime_scale
+            exposure = float(exposure) * symbol_scale
             if abs(exposure) <= 1e-9:
                 continue
 

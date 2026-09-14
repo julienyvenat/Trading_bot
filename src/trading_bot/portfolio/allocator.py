@@ -35,33 +35,49 @@ def combine_signals(signals: list[StrategySignal], allow_short: bool = False) ->
 
 
 class SignalAllocator:
-    """Calcule, pour chaque symbole, le signal combiné de toutes les stratégies actives."""
+    """Calcule, pour chaque symbole, le signal combiné de toutes les stratégies actives.
+
+    Une stratégie est soit "par symbole" (`generate_signals(df)`, le cas
+    classique), soit "cross-sectionnelle" (`generate_universe_signals`, pour
+    une stratégie qui a besoin de comparer les symboles entre eux ou de
+    réagir au prix d'un autre symbole — voir `Strategy.generate_universe_signals`).
+    Les deux types se combinent de la même façon une fois leur signal calculé.
+    """
 
     def __init__(self, strategies_with_weights: list[tuple[Strategy, float]], allow_short: bool = False) -> None:
         self.strategies_with_weights = strategies_with_weights
         self.allow_short = allow_short
 
+    def _signals_by_strategy(self, data_by_symbol: dict[str, pd.DataFrame]) -> list[tuple[float, dict[str, pd.Series]]]:
+        """Pour chaque stratégie active, calcule sa série de signal complète
+        pour chaque symbole de l'univers (qu'elle soit par symbole ou
+        cross-sectionnelle), une seule fois. Renvoie [(poids, {symbole: série})]."""
+        per_strategy: list[tuple[float, dict[str, pd.Series]]] = []
+        for strategy, weight in self.strategies_with_weights:
+            universe_signals = strategy.generate_universe_signals(data_by_symbol)
+            if universe_signals is None:
+                universe_signals = {symbol: strategy.generate_signals(df) for symbol, df in data_by_symbol.items()}
+            per_strategy.append((weight, universe_signals))
+        return per_strategy
+
     def latest_target_exposures(self, data_by_symbol: dict[str, pd.DataFrame]) -> dict[str, float]:
         """Calcule l'exposition cible combinée (dernier point) pour chaque symbole."""
-        targets: dict[str, float] = {}
-        for symbol, df in data_by_symbol.items():
-            signals = [
-                StrategySignal(strategy.name, weight, strategy.latest_signal(df))
-                for strategy, weight in self.strategies_with_weights
-            ]
-            targets[symbol] = combine_signals(signals, allow_short=self.allow_short)
-        return targets
+        series = self.target_exposure_series(data_by_symbol)
+        return {symbol: (float(s.iloc[-1]) if len(s) else 0.0) for symbol, s in series.items()}
 
     def target_exposure_series(self, data_by_symbol: dict[str, pd.DataFrame]) -> dict[str, pd.Series]:
         """Calcule la série temporelle complète d'exposition cible combinée
-        (utilisé pour le backtest vectorisé)."""
+        (utilisé pour le backtest vectorisé, et par `latest_target_exposures`
+        en live — les stratégies étant vectorisées, calculer toute la série
+        ou seulement son dernier point coûte la même chose)."""
+        per_strategy = self._signals_by_strategy(data_by_symbol)
+        total_weight = sum(weight for weight, _ in per_strategy) or 1.0
+
         result: dict[str, pd.Series] = {}
         for symbol, df in data_by_symbol.items():
             weighted_sum = None
-            total_weight = sum(weight for _, weight in self.strategies_with_weights) or 1.0
-
-            for strategy, weight in self.strategies_with_weights:
-                signal = strategy.generate_signals(df) * weight
+            for weight, signals_by_symbol in per_strategy:
+                signal = signals_by_symbol.get(symbol, pd.Series(0.0, index=df.index)) * weight
                 weighted_sum = signal if weighted_sum is None else weighted_sum.add(signal, fill_value=0.0)
 
             combined = (weighted_sum / total_weight) if weighted_sum is not None else pd.Series(0.0, index=df.index)

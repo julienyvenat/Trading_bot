@@ -164,11 +164,16 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
             scale = latest_regime_scale(bench_df["close"], regime_config.sma_window, regime_config.bearish_exposure_scale)
             if scale < 1.0:
                 logger.warning(
-                    "Filtre de régime : %s en tendance baissière, expositions réduites d'un facteur %.2f.",
+                    "Filtre de régime : %s en tendance baissière, expositions réduites d'un facteur %.2f "
+                    "(hors symboles exemptés : %s).",
                     regime_config.symbol,
                     scale,
+                    ", ".join(regime_config.exempt_symbols) or "aucun",
                 )
-            target_exposures = {sym: exp * scale for sym, exp in target_exposures.items()}
+            target_exposures = {
+                sym: (exp if sym in regime_config.exempt_symbols else exp * scale)
+                for sym, exp in target_exposures.items()
+            }
 
     logger.info("Expositions cibles : %s", {k: round(v, 3) for k, v in target_exposures.items()})
 

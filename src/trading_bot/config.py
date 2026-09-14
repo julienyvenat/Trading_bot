@@ -48,6 +48,11 @@ class RegimeFilterConfig:
     symbol: str = "SPY"
     sma_window: int = 200
     bearish_exposure_scale: float = 0.3
+    # Symboles jamais réduits par ce filtre (ex: un actif défensif utilisé par
+    # `defensive_rotation`, dont l'exposition doit au contraire AUGMENTER en
+    # régime baissier — la réduction globale de ce filtre irait à l'encontre
+    # de cet objectif).
+    exempt_symbols: list[str] = field(default_factory=list)
 
 
 @dataclass

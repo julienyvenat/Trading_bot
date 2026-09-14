@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from trading_bot.portfolio.allocator import SignalAllocator, StrategySignal, combine_signals
+from trading_bot.strategies.relative_strength import RelativeStrengthStrategy
 from trading_bot.strategies.sma_crossover import SmaCrossoverStrategy
 
 
@@ -39,3 +40,15 @@ def test_allocator_target_exposure_series_bounded(trending_up_df):
 
     series = allocator.target_exposure_series({"UP": trending_up_df})["UP"]
     assert series.between(0.0, 1.0).all()
+
+
+def test_allocator_supports_cross_sectional_strategy(trending_up_df, flat_df):
+    """Une stratégie cross-sectionnelle (`generate_universe_signals`) doit se
+    combiner avec les stratégies classiques par symbole exactement comme
+    elles, sans traitement spécial côté appelant."""
+    strategy = RelativeStrengthStrategy(lookback_window=60, top_n=1)
+    allocator = SignalAllocator([(strategy, 1.0)], allow_short=False)
+
+    exposures = allocator.latest_target_exposures({"UP": trending_up_df, "FLAT": flat_df})
+    assert exposures["UP"] == 1.0
+    assert exposures["FLAT"] == 0.0

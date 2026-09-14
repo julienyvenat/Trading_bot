@@ -3,13 +3,22 @@
 # et les paramètres de gestion du risque, sans toucher au code.
 
 universe:
-  # Actions / ETF suivis par le bot
+  # Actions / ETF suivis par le bot. GLD (or) est ici uniquement comme actif
+  # défensif pour `defensive_rotation` ci-dessous, mais reste comme tout autre
+  # symbole aussi soumis aux 3 stratégies actions (sma_crossover/
+  # rsi_mean_reversion/momentum_breakout peuvent aussi prendre position dessus
+  # selon SON PROPRE prix, en plus de la rotation défensive).
+  # Note : TLT (obligations) a été testé comme actif défensif mais écarté ---
+  # en 2022, actions ET obligations ont chuté ensemble (hausse des taux), donc
+  # la couverture obligataire a fait défaut pile quand on en avait besoin.
+  # L'or (GLD) s'est montré nettement plus robuste sur la période testée.
   symbols:
     - SPY
     - QQQ
     - AAPL
     - MSFT
     - NVDA
+    - GLD
 
   # Granularité des bougies utilisées par les stratégies
   timeframe: "1Day"
@@ -38,6 +47,30 @@ strategies:
     params:
       lookback_window: 55
       exit_window: 20
+
+  # Rotation sectorielle / force relative : cross-sectionnelle (compare les
+  # symboles entre eux plutôt que de juger chacun dans l'absolu), pour une
+  # vraie diversification de mécanisme par rapport aux 3 stratégies ci-dessus.
+  - name: relative_strength
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 90
+      top_n: 2
+
+  # Rotation défensive : passe sur l'actif défensif (`defensive_symbol`)
+  # quand `benchmark_symbol` est en tendance baissière. Diversification de
+  # classe d'actif plutôt que de mécanisme de signal. Poids volontairement
+  # réduit (0.3 plutôt que 1.0 comme les autres) : c'est une assurance
+  # d'appoint, pas une source de rendement principal — à poids égal avec les
+  # autres, elle diluait trop le reste du portefeuille (testé et écarté).
+  - name: defensive_rotation
+    enabled: true
+    weight: 0.3
+    params:
+      defensive_symbol: "GLD"
+      benchmark_symbol: "SPY"
+      sma_window: 200
 
 # Gestion du risque et du portefeuille
 risk:
@@ -93,6 +126,11 @@ market:
     # Facteur appliqué aux expositions cibles en régime baissier.
     # 0.0 = flatten total, 1.0 = filtre désactivé.
     bearish_exposure_scale: 0.3
+    # Symboles jamais réduits par ce filtre. GLD est l'actif défensif de
+    # `defensive_rotation` : son exposition doit au contraire AUGMENTER en
+    # régime baissier, donc on l'exempte de la réduction globale ci-dessus.
+    exempt_symbols:
+      - GLD
 
 # Paramètres du backtest
 backtest:
