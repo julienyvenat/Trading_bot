@@ -209,3 +209,23 @@ news_sentiment:
   # N'applique le filtre que s'il y a au moins ce nombre d'articles récents
   # (évite de bloquer une entrée sur la base d'un seul titre isolé).
   min_articles: 2
+
+# Grilles de paramètres pour la recherche par grille (voir
+# trading_bot.backtest.optimizer), utilisées par `python -m trading_bot
+# optimize` et par `walk-forward --optimize`. Vide par défaut : aucun effet
+# tant qu'au moins une grille n'est pas renseignée ci-dessous. Une stratégie
+# absente de `grids` garde ses paramètres fixes définis dans `strategies:`
+# plus haut (elle n'est simplement pas grillée).
+optimization:
+  # Attribut de BacktestMetrics à maximiser (ex: sharpe_ratio, calmar_ratio,
+  # total_return_pct, profit_factor...).
+  metric: sharpe_ratio
+  grids: {}
+  # Exemple (à décommenter et adapter) :
+  # grids:
+  #   sma_crossover:
+  #     fast_window: [10, 20, 30]
+  #     slow_window: [50, 100, 150]
+  #   rsi_mean_reversion:
+  #     oversold: [20, 25, 30]
+  #     overbought: [70, 75, 80]

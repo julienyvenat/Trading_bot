@@ -118,6 +118,22 @@ class NewsSentimentConfig:
 
 
 @dataclass
+class OptimizationConfig:
+    """Grilles de paramètres pour la recherche par grille (voir
+    `trading_bot.backtest.optimizer`), utilisées par `python -m trading_bot
+    optimize` et par `walk-forward --optimize`.
+
+    `grids` : {nom_stratégie: {param: [valeurs...]}}. Une stratégie absente
+    d'ici garde ses paramètres tels que définis dans `strategies:` plus haut
+    (elle n'est simplement pas grillée). Vide par défaut (rétrocompatible :
+    aucun effet tant que la section n'est pas renseignée).
+    """
+
+    metric: str = "sharpe_ratio"
+    grids: dict[str, dict[str, list[Any]]] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     symbols: list[str]
     timeframe: str
@@ -127,6 +143,7 @@ class AppConfig:
     backtest: BacktestConfig
     live: LiveConfig
     news_sentiment: NewsSentimentConfig = field(default_factory=NewsSentimentConfig)
+    optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
 
     def enabled_strategies(self) -> list[StrategyConfig]:
         return [s for s in self.strategies if s.enabled]
@@ -154,6 +171,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     regime_raw = market_raw.pop("regime_filter", None) or {}
     volatility_raw = market_raw.pop("volatility_filter", None) or {}
     news_sentiment_raw = raw.get("news_sentiment", None) or {}
+    optimization_raw = raw.get("optimization", None) or {}
 
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
@@ -168,6 +186,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         backtest=BacktestConfig(**raw["backtest"]),
         live=LiveConfig(**raw["live"]),
         news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
+        optimization=OptimizationConfig(**optimization_raw),
     )
 
 

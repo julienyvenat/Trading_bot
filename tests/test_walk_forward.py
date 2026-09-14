@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from trading_bot.backtest.optimizer import ParamGrid
 from trading_bot.backtest.walk_forward import _chain_equity_curves, make_folds, run_walk_forward
 from trading_bot.config import (
     AppConfig,
@@ -110,3 +111,30 @@ def test_run_walk_forward_raises_when_history_too_short(trending_up_df):
     config = make_config()
     with pytest.raises(ValueError):
         run_walk_forward(config, {"UP": trending_up_df}, train_days=10_000, test_days=1_000, step_days=1_000)
+
+
+def test_run_walk_forward_with_param_grids_selects_and_applies_best_params_per_fold(trending_up_df):
+    config = make_config()
+    grids = [ParamGrid(strategy_name="sma_crossover", params={"fast_window": [5, 10]})]
+
+    result = run_walk_forward(
+        config,
+        {"UP": trending_up_df},
+        train_days=60,
+        test_days=30,
+        step_days=30,
+        param_grids=grids,
+        max_workers=1,  # déterministe et rapide pour le test
+    )
+
+    assert len(result.folds) > 0
+    for fold in result.folds:
+        assert fold.best_params is not None
+        assert "sma_crossover" in fold.best_params
+        assert fold.best_params["sma_crossover"]["fast_window"] in (5, 10)
+
+
+def test_run_walk_forward_without_param_grids_leaves_best_params_none(trending_up_df):
+    config = make_config()
+    result = run_walk_forward(config, {"UP": trending_up_df}, train_days=60, test_days=30, step_days=30)
+    assert all(fold.best_params is None for fold in result.folds)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -64,6 +65,40 @@ def test_run_backtest_respects_gross_exposure_cap(trending_up_df):
     config = make_config(max_gross_exposure_pct=0.3, max_position_weight_pct=1.0)
     result = run_backtest(config, {"UP": trending_up_df})
     assert len(result.equity_curve) > 0
+
+
+def _make_up_then_down_df() -> pd.DataFrame:
+    """Tendance haussière franche suivie d'un retournement net à la baisse :
+    de quoi générer au moins une entrée PUIS une sortie (stop ou croisement
+    de moyennes), pour tester le tracking des trades sur un cycle complet."""
+    up = 100 + np.arange(150) * 1.0
+    down = up[-1] - np.arange(1, 80) * 1.5
+    prices = np.concatenate([up, down])
+    index = pd.date_range("2020-01-01", periods=len(prices), freq="B")
+    close = pd.Series(prices, index=index)
+    return pd.DataFrame(
+        {
+            "open": close.shift(1).fillna(close.iloc[0]),
+            "high": close * 1.005,
+            "low": close * 0.995,
+            "close": close,
+            "volume": 1_000_000,
+        }
+    )
+
+
+def test_run_backtest_tracks_completed_trades_on_a_full_round_trip():
+    config = make_config()
+    result = run_backtest(config, {"UP": _make_up_then_down_df()})
+
+    assert len(result.trades) > 0
+    for trade in result.trades:
+        assert trade.symbol == "UP"
+        assert trade.qty > 0
+        assert trade.entry_date <= trade.exit_date
+        assert trade.exit_reason in ("stop", "rebalance")
+    # Les métriques par trade du résultat doivent refléter les trades trackés.
+    assert result.metrics.num_trades == len(result.trades)
 
 
 def test_execute_at_open_uses_open_price_and_pre_trade_equity():

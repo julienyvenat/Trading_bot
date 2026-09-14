@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from trading_bot.backtest.metrics import BacktestMetrics, compute_metrics
+from trading_bot.backtest.trades import Trade, TradeTracker
 from trading_bot.config import AppConfig
 from trading_bot.indicators import atr
 from trading_bot.logger import get_logger
@@ -48,6 +49,9 @@ class BacktestResult:
     final_positions: dict[str, float] = field(default_factory=dict)
     num_stop_exits: int = 0
     final_risk_state: RiskState | None = None
+    # Trades individuels RÉALISÉS (voir `trading_bot.backtest.trades`) : les
+    # positions encore ouvertes à la fin du backtest n'y figurent pas.
+    trades: list[Trade] = field(default_factory=list)
 
 
 def _portfolio_value(positions: dict[str, float], prices: pd.Series) -> float:
@@ -68,10 +72,19 @@ def _execute_at_open(
     cash: float,
     open_prices: pd.Series,
     commission_pct: float,
+    dt: pd.Timestamp | None = None,
+    trade_tracker: TradeTracker | None = None,
 ) -> tuple[dict[str, float], float]:
     """Exécute, au prix d'ouverture `open_prices`, les poids cibles décidés à
     la clôture du jour précédent. Fonction pure (ne mute pas `positions`) :
-    renvoie les positions et le cash mis à jour."""
+    renvoie les positions et le cash mis à jour.
+
+    `dt`/`trade_tracker` sont optionnels (et vont toujours de pair) : quand
+    fournis, chaque fill déclenché ici est aussi transmis au tracker pour
+    alimenter les métriques par trade (voir `trading_bot.backtest.trades`).
+    Optionnels pour ne pas casser les appels directs existants (tests) qui
+    n'ont pas besoin de ce suivi.
+    """
     equity_at_open = cash + _portfolio_value(positions, open_prices)
     updated_positions = dict(positions)
 
@@ -90,6 +103,9 @@ def _execute_at_open(
         commission = abs(trade_value) * commission_pct
         cash -= trade_value + commission
         updated_positions[symbol] = target_qty
+
+        if trade_tracker is not None and dt is not None:
+            trade_tracker.record_fill(symbol, dt, old_qty=current_qty, new_qty=target_qty, price=price, commission=commission)
 
     return updated_positions, cash
 
@@ -187,6 +203,7 @@ def run_backtest(
     equity_records: dict[pd.Timestamp, float] = {}
     risk_state: RiskState | None = None
     num_stop_exits = 0
+    trade_tracker = TradeTracker()
     # Poids cibles décidés à la clôture d'un jour, exécutés à l'ouverture du
     # jour de bourse suivant (voir docstring du module).
     pending_target_weights: dict[str, float] | None = None
@@ -195,7 +212,9 @@ def run_backtest(
         # 0) Exécute, au prix d'ouverture d'aujourd'hui, la décision prise à
         # la clôture d'hier (rien à faire le tout premier jour).
         if pending_target_weights is not None:
-            positions, cash = _execute_at_open(pending_target_weights, positions, cash, open_df.loc[dt], commission_pct)
+            positions, cash = _execute_at_open(
+                pending_target_weights, positions, cash, open_df.loc[dt], commission_pct, dt=dt, trade_tracker=trade_tracker
+            )
             pending_target_weights = None
 
         prices = close_df.loc[dt]
@@ -221,6 +240,9 @@ def run_backtest(
                 exit_price = stop.stop_price
                 commission = abs(qty * exit_price) * commission_pct
                 cash += qty * exit_price - commission
+                trade_tracker.record_fill(
+                    symbol, dt, old_qty=qty, new_qty=0.0, price=exit_price, commission=commission, exit_reason="stop"
+                )
                 positions[symbol] = 0.0
                 trailing_stops.pop(symbol, None)
                 num_stop_exits += 1
@@ -305,11 +327,12 @@ def run_backtest(
         equity_records[dt] = cash + _portfolio_value(positions, prices)
 
     equity_curve = pd.Series(equity_records).sort_index()
-    metrics = compute_metrics(equity_curve)
+    metrics = compute_metrics(equity_curve, trades=trade_tracker.completed_trades)
     return BacktestResult(
         equity_curve=equity_curve,
         metrics=metrics,
         final_positions=positions,
         num_stop_exits=num_stop_exits,
         final_risk_state=risk_state,
+        trades=trade_tracker.completed_trades,
     )

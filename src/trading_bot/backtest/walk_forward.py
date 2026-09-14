@@ -5,26 +5,32 @@ bloc (le risque principal d'un backtest classique sur toute la période :
 "tuner" implicitement des paramètres sur une seule tranche d'historique sans
 jamais les valider ailleurs).
 
-Limite actuelle : les stratégies de ce bot utilisent des paramètres FIXES
-lus depuis `config.yaml` (pas de modèle "entraîné" sur les données). Ce
-module ne fait donc PAS de ré-optimisation de paramètres par fenêtre (ce qui
-serait un walk-forward analysis au sens strict de la recherche
-quantitative) : il ré-exécute la même config sur chaque sous-période pour
-vérifier la STABILITÉ de la performance dans le temps. Une évolution
-naturelle serait d'ajouter une recherche de grille de paramètres sur chaque
-fenêtre d'entraînement, sélectionnée puis validée hors échantillon sur la
-fenêtre de test correspondante.
+Deux modes :
+  - `param_grids=None` (défaut) : ré-exécute la même config, à paramètres
+    FIXES, sur chaque sous-période. Valide la STABILITÉ de la performance
+    dans le temps, mais ne dit rien sur l'overfitting du choix des
+    paramètres eux-mêmes.
+  - `param_grids` fourni : pour chaque fenêtre, `trading_bot.backtest.
+    optimizer.optimize` cherche les meilleurs paramètres sur la fenêtre
+    d'ENTRAÎNEMENT uniquement (jamais sur le test, pour ne pas fuiter
+    d'information du futur), puis les applique tels quels à la fenêtre de
+    TEST hors échantillon. C'est un walk-forward analysis au sens strict.
+    Si les paramètres optimaux varient énormément d'une fenêtre à l'autre
+    (voir `WalkForwardFold.best_params` dans le résumé), c'est en soi un
+    signal d'alerte d'overfitting sur la grille choisie.
 """
 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
 
 from trading_bot.backtest.engine import run_backtest
 from trading_bot.backtest.metrics import BacktestMetrics, compute_metrics
+from trading_bot.backtest.optimizer import ParamGrid, apply_params, optimize
 from trading_bot.config import AppConfig
 
 
@@ -36,6 +42,9 @@ class WalkForwardFold:
     test_end: pd.Timestamp
     train_metrics: BacktestMetrics
     test_metrics: BacktestMetrics
+    # Paramètres retenus pour cette fenêtre : None si `param_grids` n'a pas
+    # été fourni à `run_walk_forward` (paramètres fixes de `config.yaml`).
+    best_params: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass
@@ -54,6 +63,8 @@ class WalkForwardResult:
                 f"(rendement {fold.test_metrics.total_return_pct:+.2f}%, Sharpe {fold.test_metrics.sharpe_ratio:.2f}, "
                 f"max DD {fold.test_metrics.max_drawdown_pct:.2f}%)"
             )
+            if fold.best_params is not None:
+                lines.append(f"    Paramètres retenus (optimisés sur l'entraînement) : {fold.best_params}")
         lines.append("")
         lines.append("=== Cumulé sur toutes les fenêtres de TEST (hors échantillon uniquement) ===")
         lines.append(self.combined_out_of_sample_metrics.summary())
@@ -89,13 +100,23 @@ def run_walk_forward(
     step_days: int,
     benchmark_df: pd.DataFrame | None = None,
     volatility_benchmark_df: pd.DataFrame | None = None,
+    param_grids: list[ParamGrid] | None = None,
+    optimization_metric: str = "sharpe_ratio",
+    max_workers: int | None = None,
 ) -> WalkForwardResult:
     """Lance un backtest répété sur des fenêtres glissantes train/test.
 
-    Réutilise `run_backtest` tel quel sur chaque sous-période (mêmes
-    stratégies, même config de risque) : voir la limite décrite en tête de
-    module sur ce que ce walk-forward valide (stabilité dans le temps) et ne
-    valide pas (absence d'overfitting sur le choix des paramètres eux-mêmes).
+    Sans `param_grids` (défaut), réutilise `run_backtest` tel quel sur
+    chaque sous-période (mêmes stratégies, même config de risque) : voir la
+    docstring du module sur ce que ce mode valide (stabilité dans le temps)
+    et ne valide pas (absence d'overfitting sur le choix des paramètres
+    eux-mêmes).
+
+    Avec `param_grids`, ré-optimise les paramètres sur chaque fenêtre
+    d'entraînement (voir `trading_bot.backtest.optimizer.optimize`) puis les
+    applique à la fenêtre de test correspondante — jamais l'inverse, pour ne
+    jamais utiliser d'information de la période de test au moment de choisir
+    les paramètres.
     """
     full_index: pd.Index | None = None
     for df in data_by_symbol.values():
@@ -119,9 +140,30 @@ def run_walk_forward(
         train_config = _with_backtest_dates(config, train_start, train_end)
         test_config = _with_backtest_dates(config, test_start, test_end)
 
-        train_result = run_backtest(
-            train_config, data_by_symbol, benchmark_df=benchmark_df, volatility_benchmark_df=volatility_benchmark_df
-        )
+        best_params: dict[str, dict[str, Any]] | None = None
+        if param_grids:
+            optimization_results = optimize(
+                train_config,
+                data_by_symbol,
+                param_grids,
+                metric=optimization_metric,
+                benchmark_df=benchmark_df,
+                volatility_benchmark_df=volatility_benchmark_df,
+                max_workers=max_workers,
+            )
+            best = optimization_results[0]
+            best_params = best.params_by_strategy
+            # Réutilise le résultat déjà calculé par `optimize` (le meilleur
+            # combo EST le backtest d'entraînement) plutôt que de relancer un
+            # `run_backtest` d'entraînement redondant.
+            train_metrics = best.metrics
+            test_config = apply_params(test_config, best_params)
+        else:
+            train_result = run_backtest(
+                train_config, data_by_symbol, benchmark_df=benchmark_df, volatility_benchmark_df=volatility_benchmark_df
+            )
+            train_metrics = train_result.metrics
+
         test_result = run_backtest(
             test_config, data_by_symbol, benchmark_df=benchmark_df, volatility_benchmark_df=volatility_benchmark_df
         )
@@ -132,14 +174,22 @@ def run_walk_forward(
                 train_end=train_end,
                 test_start=test_start,
                 test_end=test_end,
-                train_metrics=train_result.metrics,
+                train_metrics=train_metrics,
                 test_metrics=test_result.metrics,
+                best_params=best_params,
             )
         )
         if len(test_result.equity_curve) > 0:
             test_equity_segments.append(test_result.equity_curve)
 
     combined_equity = _chain_equity_curves(test_equity_segments)
+    # Volontairement sans `trades=` ici : les trades de chaque fenêtre de
+    # test portent sur une equity qui a été RECALÉE (voir
+    # `_chain_equity_curves`), donc leur P&L en $ ne serait plus cohérent
+    # avec cette courbe combinée. Les stats par trade (num_trades,
+    # trade_win_rate_pct...) du résumé cumulé valent donc 0 par construction
+    # — regarde les métriques par trade de chaque fenêtre individuellement
+    # (`fold.test_metrics`) si tu veux ces stats.
     combined_metrics = compute_metrics(combined_equity)
 
     return WalkForwardResult(

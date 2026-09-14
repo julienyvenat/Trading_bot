@@ -1,4 +1,6 @@
-"""Calcul des métriques de performance d'une courbe d'equity."""
+"""Calcul des métriques de performance d'une courbe d'equity (et, si
+disponibles, des trades individuels qui l'ont produite — voir
+`trading_bot.backtest.trades`)."""
 
 from __future__ import annotations
 
@@ -6,6 +8,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+from trading_bot.backtest.trades import Trade
 
 TRADING_DAYS_PER_YEAR = 252
 
@@ -16,9 +20,27 @@ class BacktestMetrics:
     annualized_return_pct: float
     annualized_volatility_pct: float
     sharpe_ratio: float
+    # Comme le Sharpe, mais ne pénalise que la volatilité "défavorable" (les
+    # jours en perte) : deux stratégies de même Sharpe mais dont l'une a sa
+    # volatilité surtout à la hausse (asymétrie souhaitable) ressortent
+    # différemment ici alors qu'elles seraient confondues au Sharpe seul.
+    sortino_ratio: float
+    # Rendement annualisé / |max drawdown| : rapporte le rendement obtenu au
+    # pire creux traversé pour l'obtenir, plutôt qu'à la volatilité globale
+    # (plus parlant pour juger si un drawdown donné "en valait la peine").
+    calmar_ratio: float
     max_drawdown_pct: float
-    win_rate_pct: float
+    win_rate_pct: float  # % de JOURS positifs (existant, inchangé)
+    # Gains bruts / pertes brutes. Calculé à partir des trades réalisés si
+    # disponibles (définition standard), sinon approximé à partir des
+    # variations quotidiennes de l'equity (voir `compute_metrics`).
+    profit_factor: float
     num_trading_days: int
+    num_trades: int
+    trade_win_rate_pct: float  # % de TRADES gagnants (distinct de win_rate_pct, par jour)
+    avg_win_pct: float  # rendement moyen des trades gagnants (sur la valeur engagée à l'entrée)
+    avg_loss_pct: float  # rendement moyen des trades perdants (négatif)
+    win_loss_ratio: float  # avg_win_pct / |avg_loss_pct|
 
     def summary(self) -> str:
         return (
@@ -26,18 +48,92 @@ class BacktestMetrics:
             f"Rendement annualisé   : {self.annualized_return_pct:+.2f}%\n"
             f"Volatilité annualisée : {self.annualized_volatility_pct:.2f}%\n"
             f"Ratio de Sharpe       : {self.sharpe_ratio:.2f}\n"
+            f"Ratio de Sortino      : {self.sortino_ratio:.2f}\n"
+            f"Ratio de Calmar       : {self.calmar_ratio:.2f}\n"
             f"Max drawdown          : {self.max_drawdown_pct:.2f}%\n"
             f"Taux de jours positifs: {self.win_rate_pct:.2f}%\n"
-            f"Jours de trading      : {self.num_trading_days}"
+            f"Profit factor         : {self.profit_factor:.2f}\n"
+            f"Jours de trading      : {self.num_trading_days}\n"
+            f"--- Statistiques par trade ---\n"
+            f"Nombre de trades      : {self.num_trades}\n"
+            f"Taux de trades gagnants: {self.trade_win_rate_pct:.2f}%\n"
+            f"Gain moyen (trades +) : {self.avg_win_pct:+.2f}%\n"
+            f"Perte moyenne (trades -): {self.avg_loss_pct:+.2f}%\n"
+            f"Ratio gain/perte      : {self.win_loss_ratio:.2f}"
         )
 
 
-def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0) -> BacktestMetrics:
+def _trade_stats(trades: list[Trade]) -> dict:
+    num_trades = len(trades)
+    if num_trades == 0:
+        return dict(num_trades=0, trade_win_rate_pct=0.0, avg_win_pct=0.0, avg_loss_pct=0.0, win_loss_ratio=0.0)
+
+    wins = [t.pnl_pct for t in trades if t.pnl > 0]
+    losses = [t.pnl_pct for t in trades if t.pnl < 0]
+
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    if avg_loss != 0:
+        win_loss_ratio = avg_win / abs(avg_loss)
+    else:
+        win_loss_ratio = float("inf") if avg_win > 0 else 0.0
+
+    return dict(
+        num_trades=num_trades,
+        trade_win_rate_pct=len(wins) / num_trades * 100,
+        avg_win_pct=avg_win * 100,
+        avg_loss_pct=avg_loss * 100,
+        win_loss_ratio=win_loss_ratio,
+    )
+
+
+def _profit_factor_from_trades(trades: list[Trade]) -> float:
+    gross_profit = sum(t.pnl for t in trades if t.pnl > 0)
+    gross_loss = -sum(t.pnl for t in trades if t.pnl < 0)
+    if gross_loss <= 0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return gross_profit / gross_loss
+
+
+def _profit_factor_from_equity(equity_curve: pd.Series) -> float:
+    """Repli utilisé quand aucun trade n'est fourni (ex: appelant qui ne
+    dispose que d'une courbe d'equity) : approxime le profit factor à partir
+    des variations quotidiennes plutôt que des trades réalisés. Moins
+    standard que la version par trade, mais évite de bloquer les appelants
+    existants qui n'ont pas encore de tracking de trades."""
+    deltas = equity_curve.diff().dropna()
+    gross_profit = deltas[deltas > 0].sum()
+    gross_loss = -deltas[deltas < 0].sum()
+    if gross_loss <= 0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return gross_profit / gross_loss
+
+
+def compute_metrics(
+    equity_curve: pd.Series,
+    trades: list[Trade] | None = None,
+    risk_free_rate: float = 0.0,
+) -> BacktestMetrics:
     """Calcule les métriques standards à partir d'une courbe d'equity (valeur
-    totale du portefeuille au fil du temps)."""
+    totale du portefeuille au fil du temps) et, si fournis, des trades
+    réalisés (voir `trading_bot.backtest.trades.TradeTracker`)."""
     equity_curve = equity_curve.dropna()
+    trades = trades or []
+
     if len(equity_curve) < 2:
-        return BacktestMetrics(0, 0, 0, 0, 0, 0, len(equity_curve))
+        return BacktestMetrics(
+            total_return_pct=0.0,
+            annualized_return_pct=0.0,
+            annualized_volatility_pct=0.0,
+            sharpe_ratio=0.0,
+            sortino_ratio=0.0,
+            calmar_ratio=0.0,
+            max_drawdown_pct=0.0,
+            win_rate_pct=0.0,
+            profit_factor=0.0,
+            num_trading_days=len(equity_curve),
+            **_trade_stats(trades),
+        )
 
     daily_returns = equity_curve.pct_change().dropna()
     num_days = len(daily_returns)
@@ -50,18 +146,28 @@ def compute_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.0) -> Bac
     excess_return = daily_returns.mean() * TRADING_DAYS_PER_YEAR - risk_free_rate
     sharpe = excess_return / annualized_vol if annualized_vol > 0 else 0.0
 
+    downside_returns = daily_returns[daily_returns < 0]
+    downside_dev = downside_returns.std(ddof=0) * np.sqrt(TRADING_DAYS_PER_YEAR) if len(downside_returns) > 0 else 0.0
+    sortino = excess_return / downside_dev if downside_dev > 0 else 0.0
+
     running_max = equity_curve.cummax()
     drawdown = equity_curve / running_max - 1
     max_drawdown = drawdown.min()
+    calmar = annualized_return / abs(max_drawdown) if max_drawdown < 0 else 0.0
 
     win_rate = (daily_returns > 0).mean()
+    profit_factor = _profit_factor_from_trades(trades) if trades else _profit_factor_from_equity(equity_curve)
 
     return BacktestMetrics(
         total_return_pct=total_return * 100,
         annualized_return_pct=annualized_return * 100,
         annualized_volatility_pct=annualized_vol * 100,
         sharpe_ratio=sharpe,
+        sortino_ratio=sortino,
+        calmar_ratio=calmar,
         max_drawdown_pct=max_drawdown * 100,
         win_rate_pct=win_rate * 100,
+        profit_factor=profit_factor,
         num_trading_days=num_days,
+        **_trade_stats(trades),
     )

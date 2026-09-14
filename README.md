@@ -66,10 +66,23 @@ exactement les mêmes briques que le trading live.
   live dort intelligemment jusqu'à la prochaine séance plutôt que de sonder en
   boucle.
 - **Backtest** event-driven sur données historiques (via `yfinance`), avec
-  courbe d'equity et métriques (rendement, volatilité, Sharpe, max drawdown) —
-  et applique exactement les mêmes stops et coupe-circuits que le live. Le
-  signal calculé à la clôture du jour J s'exécute à l'**ouverture du jour
-  suivant** (J+1), plus réaliste qu'une exécution immédiate à la clôture.
+  courbe d'equity et métriques (rendement, volatilité, Sharpe, **Sortino**,
+  **Calmar**, **profit factor**, max drawdown, taux de jours positifs, et des
+  **statistiques par trade** — nombre de trades, taux de trades gagnants,
+  gain/perte moyens, ratio gain/perte) — et applique exactement les mêmes
+  stops et coupe-circuits que le live. Le signal calculé à la clôture du jour
+  J s'exécute à l'**ouverture du jour suivant** (J+1), plus réaliste qu'une
+  exécution immédiate à la clôture.
+- **Recherche par grille (grid search)** et **walk-forward avec
+  ré-optimisation** : teste plusieurs combinaisons de paramètres de
+  stratégie via le même moteur event-driven (aucune approximation
+  vectorisée), en parallèle sur plusieurs cœurs. Intégré au walk-forward
+  pour choisir les paramètres sur chaque fenêtre d'ENTRAÎNEMENT puis les
+  valider hors échantillon sur la fenêtre de TEST correspondante — jamais
+  l'inverse. Voir [Optimisation de paramètres](#optimisation-de-paramètres)
+  et [Walk-forward](#walk-forward).
+- **Rapport de backtest HTML** autonome (courbe d'equity, drawdown,
+  distribution du P&L par trade) — voir [Backtest](#backtest).
 - **Paper trading** en continu via l'API Alpaca (compte de simulation gratuit),
   avec bascule facile vers un compte réel (à vos risques). L'état du bot
   (stops en cours, ordres stop natifs, coupe-circuits) est persisté sur disque
@@ -95,6 +108,13 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
+Pour générer des rapports HTML de backtest (`--report`), installe en plus
+l'extra dédié (matplotlib) :
+
+```bash
+pip install -e ".[report]"
+```
+
 Configure ensuite tes identifiants Alpaca (nécessaires uniquement pour le
 paper/live trading, pas pour le backtest) :
 
@@ -117,14 +137,19 @@ le fichier pour le détail de chaque option.
 
 ```bash
 python -m trading_bot backtest
-# ou en sauvegardant la courbe d'equity :
+# en sauvegardant la courbe d'equity en CSV :
 python -m trading_bot backtest -o equity_curve.csv
+# en générant un rapport HTML autonome (nécessite `pip install -e ".[report]"`) :
+python -m trading_bot backtest --report rapport.html
 ```
 
 Affiche les métriques de performance (rendement total/annualisé, volatilité,
-Sharpe, max drawdown, taux de jours positifs), le nombre de sorties
-déclenchées par le stop suiveur, et signale si un coupe-circuit s'est
-déclenché pendant la période testée.
+Sharpe, Sortino, Calmar, profit factor, max drawdown, taux de jours positifs,
+statistiques par trade), le nombre de sorties déclenchées par le stop
+suiveur, et signale si un coupe-circuit s'est déclenché pendant la période
+testée. `--report` génère un fichier HTML unique (courbe d'equity, courbe de
+drawdown, histogramme du P&L par trade), consultable hors-ligne dans
+n'importe quel navigateur.
 
 ### Walk-forward
 
@@ -132,15 +157,46 @@ déclenché pendant la période testée.
 python -m trading_bot walk-forward
 # fenêtres personnalisées (en jours calendaires) :
 python -m trading_bot walk-forward --train-days 365 --test-days 90
+# avec ré-optimisation des paramètres sur chaque fenêtre d'entraînement
+# (nécessite au moins une grille dans config.yaml -> optimization.grids) :
+python -m trading_bot walk-forward --optimize
 ```
 
-Découpe l'historique en fenêtres glissantes entraînement/test et ré-exécute
-le backtest sur chacune, pour vérifier que la performance tient dans le temps
-plutôt que sur une seule période choisie. Affiche le détail par fenêtre ainsi
-que les métriques cumulées sur toutes les fenêtres de test (hors échantillon
-uniquement). Ne fait pas de ré-optimisation de paramètres par fenêtre (les
-stratégies utilisent des paramètres fixes) : voir la docstring de
-`trading_bot.backtest.walk_forward` pour le détail de ce que ça valide.
+Découpe l'historique en fenêtres glissantes entraînement/test. Sans
+`--optimize`, ré-exécute la même config (paramètres fixes) sur chaque
+sous-période, pour vérifier que la performance tient dans le temps plutôt
+que sur une seule période choisie. Avec `--optimize`, cherche en plus les
+meilleurs paramètres sur chaque fenêtre d'ENTRAÎNEMENT (voir
+[Optimisation de paramètres](#optimisation-de-paramètres)) puis les valide
+hors échantillon sur la fenêtre de TEST correspondante — jamais l'inverse,
+pour ne jamais laisser d'information du futur influencer le choix des
+paramètres. Affiche le détail par fenêtre (y compris les paramètres retenus)
+ainsi que les métriques cumulées sur toutes les fenêtres de test (hors
+échantillon uniquement). Voir la docstring de
+`trading_bot.backtest.walk_forward` pour le détail de ce que ça valide (et
+ne valide pas — voir aussi [Limites connues](#limites-connues--pistes-damélioration)).
+
+### Optimisation de paramètres
+
+```bash
+python -m trading_bot optimize
+# métrique et parallélisme personnalisés :
+python -m trading_bot optimize --metric calmar_ratio --max-workers 4 --top 5 -o resultats.csv
+```
+
+Teste toutes les combinaisons de paramètres définies dans `config.yaml ->
+optimization.grids` (produit cartésien, à définir avant de lancer la
+commande — vide par défaut), en lançant le **même moteur event-driven** que
+le reste du bot pour chaque combinaison, en parallèle sur plusieurs
+processus. Affiche les meilleures combinaisons triées par la métrique
+choisie (`optimization.metric`, ex: `sharpe_ratio`, `calmar_ratio`,
+`total_return_pct`...) ; `-o` sauvegarde tous les résultats en CSV.
+
+⚠️ Le nombre de runs est le produit du nombre de valeurs de chaque paramètre
+grillé, multiplié entre stratégies : commence avec de petites grilles avant
+d'en tester des grandes. Cette recherche optimise sur UNE période fixe (pas
+de garantie hors échantillon) — valide toujours la combinaison retenue via
+`walk-forward --optimize` avant de t'y fier.
 
 ### Paper trading
 
@@ -218,7 +274,11 @@ src/trading_bot/
     rebalancer.py              # calcule et envoie les ordres nécessaires
   backtest/
     engine.py                   # boucle de backtest jour par jour
-    metrics.py                    # métriques de performance
+    trades.py                     # suivi des trades individuels (ouverture/réduction/clôture)
+    metrics.py                     # métriques de performance (globales + par trade)
+    walk_forward.py                 # validation par fenêtres glissantes entraînement/test
+    optimizer.py                     # recherche par grille (grid search), parallélisée
+    report.py                         # rapport HTML autonome (matplotlib)
   live/
     engine.py                      # boucle live (paper/réel)
   cli.py                             # point d'entrée `python -m trading_bot`
@@ -279,7 +339,26 @@ aux autres (voir le commentaire sur `defensive_rotation` dans
 - Le filtre de sentiment de news ne s'applique qu'au trading live : aucune
   donnée de news historique alignée sur les dates de prix n'est encore
   branchée au backtest (voir `trading_bot.data.news_sentiment`).
-- Le walk-forward (voir [Walk-forward](#walk-forward)) ré-exécute la même
-  config sur chaque fenêtre plutôt que de ré-optimiser les paramètres par
-  fenêtre : il valide la stabilité dans le temps, pas l'absence d'overfitting
-  sur le choix des paramètres eux-mêmes.
+- Le walk-forward avec `--optimize` choisit les paramètres sur l'ENTRAÎNEMENT
+  et valide sur le TEST correspondant (pas de fuite d'information du futur),
+  mais reste soumis à l'overfitting sur le CHOIX de la grille elle-même
+  (bornes et valeurs testées) : si les paramètres retenus varient beaucoup
+  d'une fenêtre à l'autre (affiché dans le résumé), c'est un signal
+  d'alerte à prendre au sérieux plutôt qu'à ignorer.
+- `num_trades` (et les stats par trade associées) compte aussi les
+  réductions PARTIELLES de position comme des trades réalisés, pas
+  seulement les clôtures totales (voir `trading_bot.backtest.trades`) : sur
+  un portefeuille rebalancé quotidiennement, le nombre de trades peut donc
+  être élevé sans que ce soit une anomalie.
+- Les statistiques par trade du résumé **cumulé** d'un walk-forward
+  (`combined_out_of_sample_metrics`) valent 0 par construction : l'equity
+  combinée entre fenêtres de test est recalée (voir `_chain_equity_curves`),
+  ce qui rendrait le P&L en $ des trades individuels incohérent avec cette
+  courbe. Les stats par trade restent disponibles fenêtre par fenêtre
+  (`fold.test_metrics`).
+- Pas de pré-filtrage rapide (vectorisé/approximatif) avant la recherche par
+  grille complète : chaque combinaison relance le moteur event-driven en
+  entier. Envisageable si la taille des grilles devient un problème en
+  pratique, mais volontairement pas implémenté pour l'instant (voir
+  `trading_bot.backtest.optimizer`) pour ne jamais risquer un écart entre le
+  résultat affiché et ce qui tournerait réellement en live.
