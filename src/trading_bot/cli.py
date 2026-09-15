@@ -28,11 +28,32 @@ def _build_param_grids(config: AppConfig) -> list:
 
 
 def _fetch_data(config: AppConfig, symbols: list[str]) -> dict:
-    """Télécharge l'historique (yfinance) pour `symbols`, à la granularité
-    dérivée de `universe.timeframe` (même convention que côté live/Alpaca,
-    voir `trading_bot.data.market_data`) : '1Day' -> quotidien (comportement
-    historique, inchangé), '5Min'/'15Min'/... -> intraday pour une stratégie
-    de scalping comme `bollinger_scalping`."""
+    """Télécharge l'historique pour `symbols`, à la granularité dérivée de
+    `universe.timeframe` (même convention que côté live/Alpaca, voir
+    `trading_bot.data.market_data`) : '1Day' -> quotidien (comportement
+    historique, inchangé), '5Min'/'15Min'/'1Hour'/... -> intraday pour une
+    stratégie comme `momentum_breakout` reparamétrée en bougies intraday.
+
+    Source pilotée par `backtest.data_source` (voir `BacktestConfig`) :
+    "yfinance" (défaut) ou "alpaca" pour un historique intraday plus profond
+    que la limite de yfinance."""
+    if config.backtest.data_source == "alpaca":
+        from trading_bot.config import load_alpaca_credentials
+        from trading_bot.data.market_data import fetch_historical_bars
+
+        return fetch_historical_bars(
+            symbols,
+            start_date=config.backtest.start_date,
+            end_date=config.backtest.end_date,
+            timeframe=config.timeframe,
+            credentials=load_alpaca_credentials(),
+        )
+    if config.backtest.data_source != "yfinance":
+        raise ValueError(
+            f"`backtest.data_source` inconnu '{config.backtest.data_source}'. Valeurs supportées : "
+            "'yfinance', 'alpaca'."
+        )
+
     from trading_bot.data.historical import fetch_historical_data, yfinance_interval_for_timeframe
 
     interval = yfinance_interval_for_timeframe(config.timeframe)

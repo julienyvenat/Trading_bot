@@ -1,10 +1,19 @@
 """Stratégie de scalping par retour à la moyenne sur bandes de Bollinger.
 
 Pensée pour des bougies INTRADAY (typiquement 5 min, voir `universe.timeframe`
-dans `config/config_scalping.example.yaml`) plutôt que quotidiennes comme les
+dans `config/config_intraday.example.yaml`) plutôt que quotidiennes comme les
 autres stratégies du bot : `window` est un nombre de bougies, pas de jours,
 et les entrées/sorties visent des mouvements rapides et fréquents plutôt
 qu'un mouvement ample sur plusieurs séances.
+
+⚠️ Testée sans edge démontrable (walk-forward sur 15 mois d'historique réel,
+cumulé hors échantillon -64.4%, Sharpe -0.27) sur l'univers volatil de
+`config/config_intraday.example.yaml`, à ce grain (5min) comme à un grain
+plus grossier (15min, encore pire) — voir ce fichier pour le détail et la
+comparaison avec `momentum_breakout`, retenue à la place. Laissée ici
+disponible (peut avoir un edge sur un autre univers réellement
+mean-reverting, ex: indices larges plutôt que titres à fort beta), mais pas
+recommandée telle quelle.
 
 Logique : entre quand le prix clôture sous la bande inférieure (anormalement
 bas par rapport à sa moyenne/volatilité récente), ressort dès que le prix

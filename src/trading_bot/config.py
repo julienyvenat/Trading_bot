@@ -139,6 +139,16 @@ class BacktestConfig:
     end_date: str | None
     initial_cash: float
     commission_pct: float
+    # "yfinance" (défaut, inchangé) ou "alpaca". yfinance ne garantit qu'un
+    # historique intraday limité (~60 jours en 5Min/15Min/30Min, 7 jours en
+    # 1Min — voir `trading_bot.data.historical`) : au-delà, ou pour un
+    # walk-forward avec assez de fenêtres hors échantillon sur une stratégie
+    # intraday, utiliser "alpaca" (voir `trading_bot.data.market_data.
+    # fetch_historical_bars`, plusieurs années d'historique même sur un
+    # compte gratuit/paper) — nécessite les identifiants Alpaca dans `.env`
+    # (voir `trading_bot.config.load_alpaca_credentials`), pas seulement
+    # pour le live.
+    data_source: str = "yfinance"
 
 
 @dataclass

@@ -70,15 +70,12 @@ strategies:
       exit_window: 20
     # Rotation périodique du sous-ensemble réellement tradé par CETTE
     # stratégie (voir `UniverseRotationConfig` /
-    # `trading_bot.portfolio.universe_rotation`), avec un objectif
-    # délibérément différent de celui utilisé pour `bollinger_scalping` dans
-    # `config_scalping.example.yaml` : le scalping a besoin d'AMPLITUDE
-    # (`metric: volatility`, fenêtre ~1 séance) pour dépasser ses coûts de
-    # transaction sur des mouvements courts, alors qu'une stratégie de
-    # suivi de tendance a besoin de DIRECTION soutenue (`metric: momentum`,
-    # fenêtre alignée sur `lookback_window` ci-dessus) : un titre très
-    # volatil mais sans tendance nette serait un mauvais candidat ici, alors
-    # qu'il serait exactement ce que cherche le scalping. Pool de candidats
+    # `trading_bot.portfolio.universe_rotation`) : `metric: momentum`
+    # (fenêtre alignée sur `lookback_window` ci-dessus) est cohérent avec
+    # l'hypothèse de cette stratégie (une tendance qui se poursuit) — un
+    # titre sans tendance nette serait un mauvais candidat ici, même s'il
+    # bouge beaucoup (voir `metric: volatility`, pertinent pour une
+    # stratégie différente comme un retour à la moyenne). Pool de candidats
     # volontairement plus large que `universe.symbols` ci-dessus (les mêmes
     # titres, GLD compris pour ne rien retirer par rapport à avant, + quelques
     # large caps/ETF liquides supplémentaires), pour laisser la rotation

@@ -93,4 +93,23 @@ def test_shipped_configs_still_load():
     """Garde-fou : les deux configs livrées avec le repo doivent toujours se
     charger sans erreur après l'ajout de `universe_rotation` au schéma."""
     load_config(REPO_ROOT / "config" / "config.yaml")
-    load_config(REPO_ROOT / "config" / "config_scalping.example.yaml")
+    load_config(REPO_ROOT / "config" / "config_intraday.example.yaml")
+
+
+def test_data_source_defaults_to_yfinance_when_absent(tmp_path):
+    """Rétrocompatibilité : une config qui ne déclare pas `data_source`
+    (cas de toutes les configs existantes avant cette fonctionnalité) doit
+    continuer à utiliser yfinance sans aucun changement de comportement."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_MINIMAL_YAML)
+    config = load_config(config_path)
+
+    assert config.backtest.data_source == "yfinance"
+
+
+def test_data_source_parses_alpaca(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_MINIMAL_YAML.replace('commission_pct: 0.0005', 'commission_pct: 0.0005\n  data_source: "alpaca"'))
+    config = load_config(config_path)
+
+    assert config.backtest.data_source == "alpaca"

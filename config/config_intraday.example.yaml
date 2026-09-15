@@ -1,0 +1,252 @@
+# Exemple de configuration INTRADAY (bougies 1 heure, positions tenues
+# quelques heures à quelques jours), à l'opposé du swing trading quotidien
+# de config/config.yaml. À copier/adapter (ex: `cp
+# config/config_intraday.example.yaml config/config_intraday.yaml`) puis
+# utiliser avec `--config config/config_intraday.yaml` sur n'importe quelle
+# commande (`backtest`, `optimize`, `walk-forward`, `paper`).
+#
+# Historique : cette config visait initialement du SCALPING (bougies 5min,
+# positions de quelques minutes). Deux stratégies ont été testées à ce
+# grain (retour à la moyenne ET breakout momentum, voir la comparaison sous
+# `strategies:` ci-dessous) : aucune n'a montré d'edge hors échantillon sur
+# 15 mois d'historique réel (walk-forward -64% et -66% cumulés). Le
+# breakout momentum reparamétré en bougies 1h, lui, valide positivement
+# (walk-forward +11.5% cumulé, Sharpe 0.16, 15/24 fenêtres positives) — le
+# grain 5min/15min était trop bruité/coûteux en trades pour cet univers,
+# pas la logique de stratégie elle-même (un breakout 15min donne Sharpe
+# -0.25, pire que le 5min). D'où ce repositionnement en "intraday 1h"
+# plutôt que scalping : ce n'est plus vraiment du scalping (positions de
+# quelques heures à quelques jours, pas quelques minutes), et il serait
+# malhonnête de garder ce nom.
+#
+# ⚠️ Lire avant d'utiliser en réel :
+#   - Les paramètres ci-dessous sont un POINT DE DÉPART, pas des valeurs
+#     validées : lance `optimize` puis `walk-forward --optimize` avec cette
+#     config avant d'y allouer le moindre capital, même en paper. Le Sharpe
+#     hors échantillon mesuré (0.16) est positif mais modeste — nettement
+#     plus faible que celui du swing quotidien (1.29, voir config.yaml) :
+#     traite ceci comme une piste à surveiller, pas une stratégie mûre.
+#   - `backtest.commission_pct` (5 bps) reste probablement optimiste : le
+#     test à commission nulle a montré un taux de trades gagnants 64% -> 71%
+#     et un profit factor 0.84 -> 1.18 sur la version 5min, donc les coûts
+#     réels (spread bid-ask, slippage) pèsent significativement plus qu'un
+#     simple pourcentage de commission ne le capture. Révise ce paramètre à
+#     la hausse pour refléter tes coûts réels observés en paper trading.
+#   - Contrainte réglementaire (US) : un compte sur MARGE de moins de
+#     25 000 $ qui effectue 4 day trades ou plus en 5 jours ouvrés est
+#     classé "Pattern Day Trader" par le broker et se retrouve bloqué. Moins
+#     critique qu'en scalping 5min (positions tenues plus longtemps, donc
+#     moins de round-trips intra-séance), mais toujours à vérifier avant de
+#     passer en argent réel.
+
+universe:
+  # Titres nettement plus volatils/directionnels que le SPY/QQQ/AAPL/MSFT/
+  # NVDA du bot "swing" (config.yaml) : une stratégie de breakout a besoin
+  # de vraies tendances intraday à capturer, pas d'un marché plat. Vol
+  # annualisée approximative mesurée sur les bougies 5 min (17 août -> 14
+  # sept. 2026, à titre indicatif, ça bouge dans le temps) : TSLA ~44%,
+  # AMD ~53%, SMCI ~71%, COIN ~73%, MSTR ~76%, SOXL (ETF semiconducteurs à
+  # effet de levier x3) ~130% — à comparer aux ~20-30% habituels de
+  # SPY/QQQ/AAPL/MSFT.
+  symbols:
+    - TSLA
+    - AMD
+    - SMCI
+    - COIN
+    - MSTR
+    - SOXL
+
+  # Granularité intraday : voir trading_bot.data.historical
+  # (yfinance_interval_for_timeframe) et trading_bot.data.market_data
+  # (_parse_timeframe) pour les valeurs supportées ('1Min', '5Min', '15Min',
+  # '30Min', '1Hour', '1Day'). Historique récupéré via `backtest.data_source`
+  # ci-dessous (Alpaca ici, voir sa justification) : pas de limite de ~60
+  # jours à respecter sur `backtest.start_date` contrairement à yfinance.
+  # 1Hour spécifiquement : voir l'historique en tête de fichier sur pourquoi
+  # ce grain plutôt que 5Min/15Min (bruit/coûts de trading trop élevés à
+  # cette fréquence sur cet univers, indépendamment de la stratégie testée).
+  timeframe: "1Hour"
+
+strategies:
+  # Écarté : validé par walk-forward sur 15 mois d'historique réel (voir
+  # trading_bot.data.market_data.fetch_historical_bars), le retour à la
+  # moyenne sur bandes de Bollinger n'a PAS d'edge démontrable sur cet
+  # univers, à AUCUN grain testé (5min : cumulé hors échantillon -64.4%,
+  # Sharpe -0.27, 6/24 fenêtres positives), y compris avec ré-optimisation
+  # des paramètres à chaque fenêtre (donc pas un problème de réglage).
+  # Laissé ici désactivé, à titre de comparatif.
+  - name: bollinger_scalping
+    enabled: false
+    weight: 1.0
+    params:
+      window: 20
+      num_std: 2.0
+      min_band_width_pct: 0.0
+
+  # Stratégie retenue pour cet univers à fort momentum directionnel : même
+  # logique de breakout que la version swing quotidienne de config.yaml
+  # (trading_bot.strategies.momentum_breakout, entre sur un nouveau
+  # plus-haut à `lookback_window` BOUGIES, sort sur un plus-bas à
+  # `exit_window` bougies), reparamétrée en bougies 1h plutôt qu'en jours.
+  # `lookback_window`/`exit_window` sont les deux paramètres à optimiser en
+  # priorité (voir `optimization.grids` ci-dessous) : les valeurs
+  # ci-dessous (48h/6h) sont celles retenues le plus souvent par
+  # `walk-forward --optimize` sur les 24 fenêtres testées, pas une
+  # conclusion figée.
+  - name: momentum_breakout
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 48 # 48 * 1h = ~6 séances : nouveau plus-haut sur ~1 semaine glissante
+      exit_window: 6 # 6 * 1h : sortie sur un repli plus rapide que l'entrée
+    # Rotation périodique du sous-ensemble réellement tradé (voir
+    # `UniverseRotationConfig` / `trading_bot.portfolio.universe_rotation`) :
+    # `metric: momentum` plutôt que `volatility` — cohérent avec
+    # l'hypothèse de CETTE stratégie (une tendance qui se poursuit), pas
+    # juste avec le besoin d'amplitude (voir aussi la même logique
+    # appliquée à `momentum_breakout` dans config.yaml). `universe.symbols`
+    # reste utilisé pour la récupération de prix/l'affichage, mais n'est
+    # PAS le pool tradé par cette stratégie une fois la rotation active
+    # (voir `SignalAllocator.__init__`) : d'où sa duplication ici.
+    # ⚠️ Backtest/optimize/walk-forward uniquement pour l'instant : `paper`
+    # refuse de démarrer tant qu'une stratégie a `universe_rotation.enabled`
+    # (voir le garde-fou dans `trading_bot.cli.cmd_paper`) pour ne pas casser
+    # la parité backtest/live en tradant silencieusement moins de titres
+    # qu'en backtest.
+    universe_rotation:
+      enabled: true
+      candidates:
+        - TSLA
+        - AMD
+        - SMCI
+        - COIN
+        - MSTR
+        - SOXL
+        - NVDA
+        - PLTR
+        - RIVN
+        - ARM
+      metric: momentum
+      # Rang percentile moyen (sur `metric`, parmi les 10 candidats) requis
+      # sur les `stability_window` dernières réévaluations pour être retenu.
+      # 0.6 = il faut avoir été, en moyenne, dans la meilleure moitié
+      # supérieure du pool de façon répétée (pas juste une fois par hasard).
+      min_confidence: 0.6
+      stability_window: 3 # moyenne sur les 3 dernières réévaluations
+      lookback_window: 20 # ~3 séances de bougies 1h
+      rebalance_every: 35 # ~1 semaine de bougies 1h (5 séances x 7h) : réévalue le classement chaque semaine
+
+  # Les stratégies suivantes ont été conçues et calibrées pour du swing
+  # quotidien (config/config.yaml) : leurs fenêtres en "jours" n'ont plus le
+  # même sens rapportées à des bougies 1h. Désactivées ici par défaut ; si
+  # tu veux les réactiver pour ce timeframe, retune complètement leurs
+  # paramètres via `optimize` d'abord (ne te contente pas de diviser les
+  # fenêtres par un facteur arbitraire).
+  - name: sma_crossover
+    enabled: false
+    weight: 1.0
+    params:
+      fast_window: 20
+      slow_window: 50
+
+  - name: rsi_mean_reversion
+    enabled: false
+    weight: 1.0
+    params:
+      rsi_window: 14
+      oversold: 30
+      overbought: 70
+      trend_filter_window: 200
+
+risk:
+  allow_short: false
+  max_gross_exposure_pct: 0.90
+  max_position_weight_pct: 0.25
+  # Réduit par rapport au 0.01 (1%) de config/config.yaml : l'univers
+  # ci-dessus est ~2.5-4x plus volatil (vol annualisée ~44-130% contre
+  # ~20-30% pour SPY/QQQ/AAPL/MSFT). Le dimensionnement par ATR (voir
+  # `RiskManager.size_single`) réduit déjà le poids alloué à chaque symbole
+  # proportionnellement à SON ATR propre, mais avec max_open_positions=5 sur
+  # des titres aussi corrélés entre eux (tech/semis/crypto à beta élevé), un
+  # jour de stress qui stoppe plusieurs positions à la fois peut cumuler un
+  # risque bien supérieur à 1 x risk_per_trade_pct. Abaissé à 0.4% pour que
+  # même 5 positions stoppées le même jour (~2% cumulé) restent sous
+  # max_daily_loss_pct (3%), et laissent de la marge avant max_drawdown_pct
+  # (20%, sticky : voir trading_bot.portfolio.circuit_breaker) sur une
+  # séquence de plusieurs semaines difficiles.
+  risk_per_trade_pct: 0.004
+  # Testé plus large (2.5, comme le swing quotidien) sans amélioration
+  # (profit factor 0.79 contre 0.84 à 1.2, coupe-circuit de drawdown
+  # toujours déclenché) : la largeur du stop n'était pas le facteur limitant
+  # sur cet univers, gardé resserré par défaut.
+  atr_stop_multiple: 1.2
+  atr_window: 14 # 14 bougies de 1h = ~14h, un peu moins de 2 séances
+  max_open_positions: 5
+  max_daily_loss_pct: 0.03
+  max_drawdown_pct: 0.20
+
+market:
+  calendar: "NYSE"
+  close_buffer_minutes: 15
+  # Filtres de régime/volatilité désactivés dans cet exemple : calibrés à
+  # l'origine sur des SMA de 200 JOURS, ce qui correspondrait ici à ~200
+  # bougies de 1h (~29 séances) — une fenêtre différente de ce pour quoi ils
+  # ont été pensés et validés. À retester explicitement pour l'intraday
+  # avant de les réactiver ici.
+  regime_filter:
+    enabled: false
+    symbol: "SPY"
+    sma_window: 200
+    bearish_exposure_scale: 0.3
+    exempt_symbols: []
+  volatility_filter:
+    enabled: false
+    symbol: "VIXY"
+    sma_window: 20
+    spike_threshold_pct: 0.15
+    spike_exposure_scale: 0.5
+    exempt_symbols: []
+
+backtest:
+  # Source de données Alpaca plutôt que yfinance (défaut du bot, voir
+  # config.yaml) : yfinance ne garantit qu'un historique intraday très court
+  # (~60 jours glissants en dessous de 1Hour, voir
+  # `trading_bot.data.historical`), bien trop peu pour un walk-forward avec
+  # assez de fenêtres hors échantillon. Nécessite des identifiants Alpaca
+  # valides dans `.env` (mêmes que pour `paper`, voir
+  # `trading_bot.config.load_alpaca_credentials`), même pour juste backtester.
+  data_source: "alpaca"
+  # ~15 mois : largement dans la profondeur d'historique intraday
+  # disponible côté Alpaca (plusieurs années sur un compte gratuit/paper,
+  # au moins jusqu'à la date d'introduction en bourse pour un titre récent
+  # comme ARM). À ajuster : plus long = plus de fenêtres de walk-forward,
+  # au prix d'un téléchargement/calcul plus long.
+  start_date: "2024-06-01"
+  end_date: null
+  initial_cash: 100000
+  # ⚠️ Voir l'avertissement en tête de fichier : les coûts réels (spread,
+  # slippage) dépassent probablement ce pourcentage de commission seul.
+  commission_pct: 0.0005
+
+live:
+  # Un cycle par bougie 1h (comme config/config.yaml) : le bot doit réagir
+  # à chaque nouvelle bougie pour être cohérent avec `universe.timeframe`.
+  loop_interval_seconds: 3600
+  trade_only_when_market_open: true
+  state_file: "state/live_state_intraday.json"
+
+news_sentiment:
+  enabled: false
+  lookback_hours: 48
+  block_threshold: -0.3
+  min_articles: 2
+
+# Grille de départ pour `optimize` / `walk-forward --optimize` sur les deux
+# paramètres clés de momentum_breakout. À valider par walk-forward avant
+# toute allocation de capital (voir avertissement en tête de fichier).
+optimization:
+  metric: sharpe_ratio
+  grids:
+    momentum_breakout:
+      lookback_window: [24, 48, 78] # ~3 / ~6 / ~10 séances
+      exit_window: [6, 12, 24] # ~1 / ~1.5 / ~3 séances

@@ -26,13 +26,16 @@ exactement les mêmes briques que le trading live.
     tendance baissière, pour une diversification de classe d'actif plutôt que
     de signal.
   - `bollinger_scalping` : retour à la moyenne sur bandes de Bollinger,
-    pensée pour de l'**intraday** (bougies 5 min...) plutôt que du swing
-    quotidien — voir [Scalping / intraday](#scalping--intraday).
+    pensée pour de l'**intraday** (bougies 5 min...) — voir
+    [Intraday (ex-scalping)](#intraday-ex-scalping) : testée sans edge
+    démontrable sur l'univers volatil de l'exemple fourni, désactivée par
+    défaut dans cet exemple, au profit de `momentum_breakout` reparamétrée
+    en bougies 1h.
   - Facile d'en ajouter de nouvelles (voir [Ajouter une stratégie](#ajouter-une-stratégie)).
 - **Granularité configurable** (`universe.timeframe`) : quotidien par défaut
-  (`1Day`), ou intraday (`1Hour`, `30Min`, `15Min`, `5Min`, `1Min`) pour du
-  scalping — le même moteur event-driven tourne à l'identique quelle que
-  soit la granularité (voir [Scalping / intraday](#scalping--intraday)).
+  (`1Day`), ou intraday (`1Hour`, `30Min`, `15Min`, `5Min`, `1Min`) — le même
+  moteur event-driven tourne à l'identique quelle que soit la granularité
+  (voir [Intraday (ex-scalping)](#intraday-ex-scalping)).
 - **Gestion du risque** :
   - Dimensionnement des positions basé sur l'ATR (risque max par trade), poids
     max par position, exposition brute max du portefeuille, nombre max de
@@ -205,40 +208,62 @@ d'en tester des grandes. Cette recherche optimise sur UNE période fixe (pas
 de garantie hors échantillon) — valide toujours la combinaison retenue via
 `walk-forward --optimize` avant de t'y fier.
 
-### Scalping / intraday
+### Intraday (ex-scalping)
 
 Le bot supporte des bougies intraday (`universe.timeframe: "5Min"`, `"15Min"`,
 `"1Hour"`...) en plus du quotidien par défaut — même moteur event-driven,
 mêmes commandes (`backtest`, `optimize`, `walk-forward`, `paper`), juste une
 granularité différente. Un exemple complet est fourni :
-[`config/config_scalping.example.yaml`](config/config_scalping.example.yaml)
-(stratégie `bollinger_scalping`, bougies 5 min, stops resserrés, grille
-d'optimisation pré-remplie).
+[`config/config_intraday.example.yaml`](config/config_intraday.example.yaml)
+(stratégie `momentum_breakout` reparamétrée en bougies 1h, source de données
+Alpaca pour un historique intraday profond, rotation d'univers par momentum,
+grille d'optimisation pré-remplie).
+
+Cette config a d'abord visé du SCALPING (bougies 5 min) avec une stratégie de
+retour à la moyenne (`bollinger_scalping`) : **validé par walk-forward sur 15
+mois d'historique réel, ni le retour à la moyenne ni un breakout momentum au
+même grain n'ont montré d'edge hors échantillon** (cumulé -64% et -66%
+respectivement, 5Min *plus bruité et plus coûteux en trades* que 15Min qui a
+fait pire encore). Reparamétré en bougies 1h, le breakout momentum valide
+positivement (+11.5% cumulé hors échantillon, Sharpe 0.16, 15/24 fenêtres de
+test positives) : le problème n'était pas la logique de stratégie, mais le
+grain temporel — trop bruité/coûteux en trades à 5min et 15min sur cet
+univers. Ce n'est donc plus vraiment du "scalping" (positions de quelques
+heures à quelques jours, pas quelques minutes), d'où le renommage. Sharpe 0.16
+reste modeste (à comparer au 1.29 du swing quotidien, voir plus haut) : à
+traiter comme une piste à surveiller, pas une stratégie mûre pour du capital
+réel.
 
 ```bash
-cp config/config_scalping.example.yaml config/config_scalping.yaml
-# adapter backtest.start_date : yfinance ne garantit qu'un historique limité
-# à cette granularité (~60 jours glissants pour du 5 min, 7 jours pour du 1 min)
+cp config/config_intraday.example.yaml config/config_intraday.yaml
 
-python -m trading_bot backtest --config config/config_scalping.yaml
-python -m trading_bot optimize --config config/config_scalping.yaml
-python -m trading_bot walk-forward --config config/config_scalping.yaml --train-days 15 --test-days 5 --optimize
+python -m trading_bot backtest --config config/config_intraday.yaml
+python -m trading_bot optimize --config config/config_intraday.yaml
+python -m trading_bot walk-forward --config config/config_intraday.yaml --train-days 90 --test-days 30 --optimize
 ```
 
 ⚠️ À lire avant d'aller plus loin (détaillé en commentaire dans le fichier
 d'exemple) :
-- `backtest.commission_pct` (5 bps, calibré pour du swing quotidien)
-  sous-estime probablement les coûts réels du scalping (spread bid-ask,
-  slippage à haute fréquence) — les résultats de backtest sont optimistes
-  tant que ce paramètre n'est pas révisé à la hausse.
+- `backtest.data_source: "alpaca"` : yfinance ne garantit qu'un historique
+  intraday limité (~60 jours glissants en dessous de 1Hour, 7 jours en
+  1Min) — bien trop peu pour un walk-forward avec assez de fenêtres hors
+  échantillon. La source Alpaca (`trading_bot.data.market_data.
+  fetch_historical_bars`) conserve plusieurs années d'historique intraday
+  même sur un compte gratuit/paper, mais nécessite des identifiants Alpaca
+  valides dans `.env`, y compris pour juste backtester.
+- `backtest.commission_pct` (5 bps) sous-estime probablement les coûts
+  réels : un test à commission nulle a fait passer le taux de trades
+  gagnants de 64% à 71% et le profit factor de 0.84 à 1.18 sur la version
+  5min — les coûts réels (spread bid-ask, slippage) pèsent significativement
+  plus qu'un simple pourcentage de commission ne le capture.
 - Contrainte réglementaire US : un compte sur marge de moins de 25 000 $
   qui fait 4 day trades ou plus en 5 jours ouvrés est classé *Pattern Day
-  Trader* et se retrouve bloqué par le broker — le scalping en fait un
-  usage intensif par construction.
-- Les autres stratégies (`sma_crossover`, `rsi_mean_reversion`,
-  `momentum_breakout`) sont désactivées dans l'exemple : leurs fenêtres ont
-  été calibrées en JOURS pour du swing, pas en bougies pour de l'intraday —
-  les réactiver sans les retuner via `optimize` n'a pas de sens.
+  Trader* et se retrouve bloqué par le broker — moins critique qu'en
+  scalping 5min (positions tenues plus longtemps), mais toujours à vérifier.
+- Les autres stratégies (`sma_crossover`, `rsi_mean_reversion`) sont
+  désactivées dans l'exemple : leurs fenêtres ont été calibrées en JOURS
+  pour du swing, pas en bougies pour de l'intraday — les réactiver sans les
+  retuner via `optimize` n'a pas de sens.
 
 ### Paper trading
 
@@ -311,6 +336,7 @@ src/trading_bot/
     stops.py                # stop-loss suiveur ATR (logique pure)
     circuit_breaker.py        # coupe-circuits perte journalière / drawdown
     regime.py                  # filtre de régime de marché (SMA du benchmark)
+    universe_rotation.py         # rotation périodique de l'univers tradé, par stratégie
   execution/
     broker_base.py          # interface abstraite de broker
     alpaca_broker.py          # implémentation Alpaca
@@ -405,17 +431,21 @@ aux autres (voir le commentaire sur `defensive_rotation` dans
   pratique, mais volontairement pas implémenté pour l'instant (voir
   `trading_bot.backtest.optimizer`) pour ne jamais risquer un écart entre le
   résultat affiché et ce qui tournerait réellement en live.
-- Le scalping/intraday (voir [Scalping / intraday](#scalping--intraday))
-  n'a qu'une seule stratégie dédiée (`bollinger_scalping`) pour l'instant ;
-  les autres restent calibrées pour du swing quotidien. yfinance limite en
-  outre l'historique disponible aux granularités fines (~60 jours pour du
-  5 min, 7 jours pour du 1 min) : `fetch_historical_data` avertit si
-  `backtest.start_date` dépasse cette limite connue, mais ne la fait pas
-  respecter automatiquement (yfinance renvoie alors moins de données que
-  demandé, silencieusement).
+- L'intraday (voir [Intraday (ex-scalping)](#intraday-ex-scalping)) n'a
+  qu'une seule combinaison validée pour l'instant (`momentum_breakout` en
+  bougies 1h) ; les autres stratégies restent calibrées pour du swing
+  quotidien, et `bollinger_scalping` (retour à la moyenne) n'a montré aucun
+  edge démontrable sur l'univers testé, à aucun grain (5Min/15Min).
+  yfinance limite en outre l'historique disponible aux granularités fines
+  (~60 jours en dessous de 1Hour, 7 jours pour du 1 min) : `data_source:
+  "alpaca"` contourne cette limite pour le backtest (voir
+  `trading_bot.data.market_data.fetch_historical_bars`), mais reste soumis
+  à la profondeur d'historique réellement disponible côté Alpaca pour
+  chaque titre (ex: date d'introduction en bourse).
 - Le compte de commission (5 bps) et le modèle de fill (prix d'ouverture de
   la bougie suivante, voir `trading_bot.backtest.engine`) n'ont pas été
-  révisés spécifiquement pour l'intraday : ils sous-estiment probablement
-  les coûts réels du scalping (spread bid-ask, slippage à haute fréquence),
-  qui pèsent proportionnellement bien plus sur des gains visés petits et
-  fréquents qu'en swing quotidien.
+  révisés spécifiquement pour l'intraday : un test à commission nulle a
+  amélioré le taux de trades gagnants de 64% à 71% sur l'exemple intraday,
+  signe qu'ils sous-estiment probablement les coûts réels (spread bid-ask,
+  slippage), qui pèsent proportionnellement plus sur des gains visés petits
+  et fréquents qu'en swing quotidien.
