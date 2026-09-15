@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from trading_bot.config import UniverseRotationConfig
+from trading_bot.portfolio.symbol_track_record import SymbolTrackRecord
 from trading_bot.portfolio.universe_rotation import compute_membership
 from trading_bot.strategies.base import Strategy
 
@@ -52,6 +53,7 @@ class SignalAllocator:
         allow_short: bool = False,
         rotation_configs: dict[str, UniverseRotationConfig] | None = None,
         base_symbols: list[str] | None = None,
+        track_record: SymbolTrackRecord | None = None,
     ) -> None:
         """`rotation_configs` (optionnel, clé = `Strategy.name`) : pour une
         stratégie qui y figure avec `enabled=True`, restreint son univers à
@@ -66,11 +68,16 @@ class SignalAllocator:
         fuiraient silencieusement dans le calcul des stratégies qui n'ont
         rien demandé. `None` = pas de restriction, tout `data_by_symbol` est
         utilisé tel quel (comportement historique, inchangé tant qu'aucune
-        rotation n'est configurée nulle part)."""
+        rotation n'est configurée nulle part).
+        `track_record` : base persistante de performance réelle par symbole
+        (voir `trading_bot.portfolio.symbol_track_record`), utilisée
+        seulement par une rotation dont `metric == "track_record"` ; sans
+        objet, ignoré par toute autre métrique."""
         self.strategies_with_weights = strategies_with_weights
         self.allow_short = allow_short
         self.rotation_configs = rotation_configs or {}
         self.base_symbols = base_symbols
+        self.track_record = track_record
 
     def _signals_by_strategy(self, data_by_symbol: dict[str, pd.DataFrame]) -> list[tuple[float, dict[str, pd.Series]]]:
         """Pour chaque stratégie active, calcule sa série de signal complète
@@ -92,7 +99,7 @@ class SignalAllocator:
                 universe_signals = {symbol: strategy.generate_signals(df) for symbol, df in subset.items()}
 
             if rotation and rotation.enabled:
-                membership = compute_membership(subset, rotation)
+                membership = compute_membership(subset, rotation, self.track_record)
                 universe_signals = {
                     symbol: signal * membership[symbol].reindex(signal.index).fillna(0.0)
                     for symbol, signal in universe_signals.items()

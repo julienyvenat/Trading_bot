@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from trading_bot.config import UniverseRotationConfig
+from trading_bot.portfolio.symbol_track_record import SymbolStats, SymbolTrackRecord
 from trading_bot.portfolio.universe_rotation import compute_confidence, compute_membership
 
 
@@ -197,3 +198,47 @@ def test_membership_reindexed_to_each_symbols_own_index():
 
     assert list(membership["SHORT"].index) == list(data["SHORT"].index)
     assert list(membership["LONG"].index) == list(data["LONG"].index)
+
+
+def test_track_record_metric_selects_symbol_with_better_expectancy():
+    data = {"GOOD": _ohlcv(np.full(20, 100.0)), "BAD": _ohlcv(np.full(20, 100.0))}
+    track_record = SymbolTrackRecord(
+        by_symbol={
+            "GOOD": SymbolStats(trade_count=100, win_count=70, total_pnl_pct=20.0, total_pnl_pct_sq=6.0),
+            "BAD": SymbolStats(trade_count=100, win_count=30, total_pnl_pct=-15.0, total_pnl_pct_sq=5.0),
+        }
+    )
+    config = _base_config(metric="track_record", lookback_window=1, rebalance_every=1)
+
+    membership = compute_membership(data, config, track_record)
+
+    assert (membership["GOOD"] == 1.0).all()
+    assert (membership["BAD"] == 0.0).all()
+
+
+def test_track_record_metric_excludes_symbol_with_no_recorded_trades():
+    """Un candidat sans historique dans la base (jamais tradé par ce bot)
+    doit rester non sélectionné (confiance NaN), pas halluciner un score
+    neutre qui le ferait paraître "moyen" par défaut."""
+    data = {"KNOWN": _ohlcv(np.full(20, 100.0)), "UNKNOWN": _ohlcv(np.full(20, 100.0))}
+    track_record = SymbolTrackRecord(
+        by_symbol={"KNOWN": SymbolStats(trade_count=50, win_count=40, total_pnl_pct=10.0, total_pnl_pct_sq=3.0)}
+    )
+    config = _base_config(metric="track_record", min_confidence=0.01, lookback_window=1, rebalance_every=1)
+
+    membership = compute_membership(data, config, track_record)
+
+    assert (membership["KNOWN"] == 1.0).all()
+    assert (membership["UNKNOWN"] == 0.0).all()
+
+
+def test_track_record_metric_without_store_selects_nothing():
+    """`track_record=None` (pas de base fournie) ne doit jamais planter :
+    confiance NaN pour tout le monde, donc aucune sélection."""
+    data = {"A": _ohlcv(np.full(20, 100.0)), "B": _ohlcv(np.full(20, 100.0))}
+    config = _base_config(metric="track_record", min_confidence=0.01, lookback_window=1, rebalance_every=1)
+
+    membership = compute_membership(data, config, track_record=None)
+
+    assert (membership["A"] == 0.0).all()
+    assert (membership["B"] == 0.0).all()

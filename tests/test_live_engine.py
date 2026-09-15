@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -178,6 +180,37 @@ def test_run_once_cancels_native_stop_before_flattening_on_drawdown(monkeypatch,
     assert ("UP", 100.0, "sell") in broker.submitted_orders
 
 
+def test_run_once_records_pre_existing_realized_trade_but_keeps_stale_snapshot_on_drawdown_halt(
+    monkeypatch, tmp_path, uptrend_bars
+):
+    """Le coupe-circuit de drawdown doit quand même enregistrer un trade
+    réalisé AVANT ce cycle (ex: stop déclenché juste avant le
+    déclenchement du coupe-circuit), mais ne doit PAS mettre à jour
+    `last_known_positions` : le flatten qu'il vient de déclencher sera
+    détecté comme réalisé au PROCHAIN cycle, par comparaison avec cet
+    instantané resté volontairement inchangé (voir le commentaire dans
+    trading_bot.live.engine.run_once)."""
+    config = make_config()
+    config.live.track_record_file = str(tmp_path / "track_record.json")
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    broker = FakeBroker(equity=70_000.0, positions={}, prices={"UP": last_price})  # UP déjà fermée avant ce cycle
+
+    from trading_bot.execution.broker_base import PositionSnapshot
+
+    stale_snapshot = PositionSnapshot(qty=50.0, avg_entry_price=80.0)
+    state = LiveState(last_known_positions={"UP": stale_snapshot})
+    state.risk_state = engine_module.RiskState.initial(100_000.0, today=pd.Timestamp.now(tz="UTC").date())
+
+    new_state = engine_module.run_once(config, broker, dry_run=False, state=state)
+
+    track_record = json.loads((tmp_path / "track_record.json").read_text())
+    assert track_record["UP"]["trade_count"] == 1
+    assert new_state.last_known_positions == {"UP": stale_snapshot}
+
+
 def make_two_symbol_config() -> AppConfig:
     config = make_config()
     config.symbols = ["UP", "UP2"]
@@ -256,3 +289,68 @@ def test_run_once_renews_stop_order_on_new_trading_day_even_if_price_unchanged(m
     assert "stop-yesterday" in broker.cancelled_order_ids
     assert new_state.stop_order_ids["UP"] != "stop-yesterday"
     assert new_state.stop_order_dates["UP"] == pd.Timestamp.now(tz="UTC").date().isoformat()
+
+
+def test_run_once_records_stop_fill_between_cycles_into_track_record(monkeypatch, tmp_path, uptrend_bars):
+    """Une position qui a disparu côté broker depuis le dernier cycle connu
+    (stop natif déclenché entre deux cycles, ou toute autre sortie externe)
+    doit être détectée comme un trade RÉALISÉ et alimenter la base
+    persistante de suivi par symbole (voir
+    trading_bot.portfolio.symbol_track_record), pas seulement déclencher le
+    nettoyage de trailing_stops/stop_order_ids déjà en place."""
+    config = make_config()
+    config.live.track_record_file = str(tmp_path / "track_record.json")
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    broker = FakeBroker(equity=100_000.0, positions={}, prices={"UP": last_price})  # déjà fermée côté broker
+
+    from trading_bot.execution.broker_base import PositionSnapshot
+
+    state = LiveState(last_known_positions={"UP": PositionSnapshot(qty=100.0, avg_entry_price=90.0)})
+
+    engine_module.run_once(config, broker, dry_run=False, state=state)
+
+    track_record = json.loads((tmp_path / "track_record.json").read_text())
+    assert track_record["UP"]["trade_count"] == 1
+    assert track_record["UP"]["total_pnl_pct"] == pytest.approx((last_price - 90.0) / 90.0)
+
+
+def test_run_once_records_same_cycle_liquidation_into_track_record(monkeypatch, tmp_path, uptrend_bars):
+    """Une position liquidée PAR CE CYCLE (ex: symbole orphelin hors de
+    l'univers configuré, voir test_run_once_prices_and_flattens_positions_outside_universe)
+    doit elle aussi être enregistrée comme trade réalisé, pas seulement les
+    fermetures détectées entre deux cycles."""
+    config = make_config()
+    config.live.track_record_file = str(tmp_path / "track_record.json")
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    broker = FakeBroker(
+        equity=100_000.0,
+        positions={"ORPHAN": Position(symbol="ORPHAN", qty=10.0, market_value=500.0, avg_entry_price=45.0)},
+        prices={"UP": float(uptrend_bars["close"].iloc[-1]), "ORPHAN": 50.0},
+    )
+
+    engine_module.run_once(config, broker, dry_run=False, state=LiveState())
+
+    track_record = json.loads((tmp_path / "track_record.json").read_text())
+    assert track_record["ORPHAN"]["trade_count"] == 1
+    assert track_record["ORPHAN"]["total_pnl_pct"] == pytest.approx((50.0 - 45.0) / 45.0)
+
+
+def test_run_once_does_not_touch_track_record_when_nothing_realized(monkeypatch, tmp_path, uptrend_bars):
+    """Pas de trade réalisé ce cycle -> pas d'I/O sur la base de suivi (pas
+    de fichier créé)."""
+    config = make_config()
+    config.live.track_record_file = str(tmp_path / "track_record.json")
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    broker = FakeBroker(equity=100_000.0, positions={}, prices={"UP": last_price})
+
+    engine_module.run_once(config, broker, dry_run=False, state=LiveState())
+
+    assert not (tmp_path / "track_record.json").exists()

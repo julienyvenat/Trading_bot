@@ -28,13 +28,20 @@ from __future__ import annotations
 import pandas as pd
 
 from trading_bot.config import UniverseRotationConfig
+from trading_bot.portfolio.symbol_track_record import SymbolTrackRecord
 
-SUPPORTED_METRICS = ("volatility", "momentum", "dollar_volume")
+SUPPORTED_METRICS = ("volatility", "momentum", "dollar_volume", "track_record")
 
 
-def _compute_metric(close_df: pd.DataFrame, volume_df: pd.DataFrame | None, metric: str, lookback_window: int) -> pd.DataFrame:
+def _compute_metric(
+    close_df: pd.DataFrame,
+    volume_df: pd.DataFrame | None,
+    metric: str,
+    lookback_window: int,
+    track_record: SymbolTrackRecord | None,
+) -> pd.DataFrame:
     """Un score brut par symbole et par date, où "plus haut = plus
-    intéressant" dans les 3 cas (permet un classement percentile uniforme,
+    intéressant" dans les 4 cas (permet un classement percentile uniforme,
     voir `compute_confidence`)."""
     if metric == "volatility":
         # Écart-type des rendements : favorise les titres qui bougent le
@@ -50,6 +57,19 @@ def _compute_metric(close_df: pd.DataFrame, volume_df: pd.DataFrame | None, metr
         if volume_df is None:
             raise ValueError("La métrique 'dollar_volume' nécessite une colonne 'volume'.")
         return (close_df * volume_df).rolling(window=lookback_window, min_periods=lookback_window).mean()
+    if metric == "track_record":
+        # Vécu réel accumulé avec CE bot (voir
+        # `trading_bot.portfolio.symbol_track_record`) plutôt qu'un proxy
+        # technique : score CONSTANT sur toute la période (recalculé à
+        # chaque run à partir de la base persistante, pas à chaque bougie),
+        # NaN pour un symbole encore inconnu de la base (pas encore de
+        # trade réel enregistré) plutôt que de lui prêter arbitrairement un
+        # score neutre qui le ferait paraître "moyen" par défaut.
+        scores = {}
+        for symbol in close_df.columns:
+            stats = (track_record.by_symbol if track_record else {}).get(symbol)
+            scores[symbol] = stats.expectancy_score() if stats and stats.trade_count > 0 else float("nan")
+        return pd.DataFrame({symbol: score for symbol, score in scores.items()}, index=close_df.index)
     raise ValueError(f"Métrique de rotation inconnue '{metric}'. Valeurs supportées : {', '.join(SUPPORTED_METRICS)}.")
 
 
@@ -58,7 +78,11 @@ def _checkpoint_index(full_index: pd.DatetimeIndex, rebalance_every: int) -> pd.
     return full_index[list(positions)]
 
 
-def compute_confidence(candidates_data: dict[str, pd.DataFrame], config: UniverseRotationConfig) -> dict[str, pd.Series]:
+def compute_confidence(
+    candidates_data: dict[str, pd.DataFrame],
+    config: UniverseRotationConfig,
+    track_record: SymbolTrackRecord | None = None,
+) -> dict[str, pd.Series]:
     """Score de confiance par candidat, dans [0, 1] (`NaN` pendant le
     warmup, avant `stability_window` réévaluations complètes).
 
@@ -77,7 +101,12 @@ def compute_confidence(candidates_data: dict[str, pd.DataFrame], config: Univers
     Pas de biais de lookahead : le percentile à la date de réévaluation T
     n'utilise que les données jusqu'à T inclus — même convention que le
     reste du moteur (signal calculé à la clôture de T, exécuté à
-    l'ouverture de T+1, voir `trading_bot.backtest.engine`).
+    l'ouverture de T+1, voir `trading_bot.backtest.engine`). `track_record`
+    (utilisé seulement si `config.metric == "track_record"`) échappe à
+    cette convention en un sens : c'est un score CONSTANT sur toute la
+    période (recalculé à chaque run depuis la base persistante), donc son
+    absence de biais de lookahead dépend de CE QUE CONTIENT la base au
+    moment du run — voir `trading_bot.portfolio.symbol_track_record`.
     """
     if not candidates_data:
         return {}
@@ -87,7 +116,7 @@ def compute_confidence(candidates_data: dict[str, pd.DataFrame], config: Univers
     if config.metric == "dollar_volume":
         volume_df = pd.DataFrame({sym: df["volume"] for sym, df in candidates_data.items()}).sort_index().ffill()
 
-    metric_df = _compute_metric(close_df, volume_df, config.metric, config.lookback_window)
+    metric_df = _compute_metric(close_df, volume_df, config.metric, config.lookback_window, track_record)
     percentile_df = metric_df.rank(axis=1, pct=True, ascending=True)
 
     checkpoints = _checkpoint_index(close_df.index, config.rebalance_every)
@@ -104,10 +133,14 @@ def compute_confidence(candidates_data: dict[str, pd.DataFrame], config: Univers
     return {symbol: confidence[symbol].reindex(df.index) for symbol, df in candidates_data.items()}
 
 
-def compute_membership(candidates_data: dict[str, pd.DataFrame], config: UniverseRotationConfig) -> dict[str, pd.Series]:
+def compute_membership(
+    candidates_data: dict[str, pd.DataFrame],
+    config: UniverseRotationConfig,
+    track_record: SymbolTrackRecord | None = None,
+) -> dict[str, pd.Series]:
     """Calcule, pour chaque symbole candidat, une série (alignée sur son
     propre index) valant 1.0 quand sa confiance (voir `compute_confidence`)
     atteint `config.min_confidence`, 0.0 sinon (y compris pendant le warmup,
     où la confiance est encore `NaN`)."""
-    confidence_by_symbol = compute_confidence(candidates_data, config)
+    confidence_by_symbol = compute_confidence(candidates_data, config, track_record)
     return {symbol: (series >= config.min_confidence).astype(float) for symbol, series in confidence_by_symbol.items()}

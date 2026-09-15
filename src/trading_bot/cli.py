@@ -168,6 +168,24 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         generate_html_report(result, args.report)
         logger.info("Rapport HTML sauvegardé dans %s", args.report)
 
+    if args.update_track_record:
+        from trading_bot.portfolio.symbol_track_record import load_track_record, merge_trades, save_track_record
+
+        path = config.live.track_record_file
+        before = load_track_record(path)
+        trades_before = sum(s.trade_count for s in before.by_symbol.values())
+        track_record = merge_trades(before, result.trades)
+        trades_after = sum(s.trade_count for s in track_record.by_symbol.values())
+        save_track_record(path, track_record)
+        logger.info(
+            "Base de suivi par symbole mise à jour (%s) : %d nouveau(x) trade(s) ajouté(s) sur %d de ce "
+            "backtest (%d déjà connus, filtrés — voir trading_bot.portfolio.symbol_track_record).",
+            path,
+            trades_after - trades_before,
+            len(result.trades),
+            len(result.trades) - (trades_after - trades_before),
+        )
+
 
 def cmd_walk_forward(args: argparse.Namespace) -> None:
     from trading_bot.backtest.walk_forward import run_walk_forward
@@ -343,6 +361,17 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("-o", "--output", default=None, help="Chemin CSV où sauvegarder la courbe d'equity.")
     backtest_parser.add_argument(
         "--report", default=None, help="Chemin du rapport HTML autonome à générer (nécessite l'extra 'report')."
+    )
+    backtest_parser.add_argument(
+        "--update-track-record",
+        action="store_true",
+        help=(
+            "Enregistre les trades de ce backtest dans la base de suivi par symbole "
+            "(config.live.track_record_file, voir trading_bot.portfolio.symbol_track_record). "
+            "Idempotent sur une période déjà connue, mais rejouer le même backtest en boucle "
+            "n'apporte aucune information nouvelle : préfère l'activer sur des fenêtres réellement "
+            "nouvelles (ou laisser le live l'alimenter au fil du temps)."
+        ),
     )
     backtest_parser.set_defaults(func=cmd_backtest)
 

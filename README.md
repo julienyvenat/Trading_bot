@@ -265,6 +265,50 @@ d'exemple) :
   pour du swing, pas en bougies pour de l'intraday — les réactiver sans les
   retuner via `optimize` n'a pas de sens.
 
+### Cotation de confiance par symbole (track record)
+
+En plus des métriques techniques de `universe_rotation` (volatilité,
+momentum, liquidité — voir [Intraday](#intraday-ex-scalping)), un candidat
+peut être classé sur son **vécu réel avec ce bot** plutôt que sur un proxy
+de prix : `metric: "track_record"`. Contrairement aux autres métriques
+(recalculées à froid depuis l'historique de prix à chaque run), celle-ci
+s'appuie sur une base persistante
+([`trading_bot.portfolio.symbol_track_record`](src/trading_bot/portfolio/symbol_track_record.py))
+qui accumule les trades réalisés d'un run à l'autre.
+
+```bash
+python -m trading_bot backtest --config config/config_intraday.yaml --update-track-record
+```
+
+`--update-track-record` enregistre les trades de ce backtest dans
+`live.track_record_file` (`state/symbol_track_record.json` par défaut). Le
+**paper/live trading alimente aussi cette même base automatiquement**, à
+chaque cycle (`trading_bot.live.trade_realization.detect_realized_trades`,
+voir `trading_bot.live.engine.run_once`) : contrairement au backtest, une
+séance de trading réelle est TOUJOURS une période réellement nouvelle, donc
+pas besoin de flag `--update-track-record` côté `paper`, ni de risque de
+gonfler artificiellement les stats en rejouant la même période. Le prix
+d'entrée utilisé est celui déjà calculé par le broker (`avg_entry_price`),
+pas reconstruit à la main — voir les limites précises dans la docstring de
+`trading_bot.live.trade_realization` (prix de sortie approximé par le
+dernier prix connu, pas le fill exact du broker).
+
+Le score utilisé pour classer les candidats est un gain moyen par trade
+(`expectancy_score`), atténué vers 0 tant que l'échantillon est petit
+(shrinkage bayésien simple) pour qu'un symbole avec 2 trades gagnants sur 2
+ne paraisse pas déjà "excellent" ; un candidat encore inconnu de la base
+n'est jamais sélectionné (confiance `NaN`, pas un score neutre par défaut).
+
+⚠️ Deux limites importantes à connaître avant d'utiliser cette métrique :
+- **L'accumulation n'apporte de l'information nouvelle que sur des
+  périodes réellement nouvelles.** Rejouer le même backtest en boucle ne
+  fait rien gagner (idempotent, voir la marque d'eau `last_exit_date` par
+  symbole) ; l'enchaînement de fenêtres non recouvrantes (walk-forward, ou
+  paper trading jour après jour) est ce qui fait vraiment grandir la base.
+- Non encore validée par `walk-forward` sur cette métrique précise — comme
+  toute nouvelle piste dans ce projet, à tester avant de lui faire
+  remplacer les métriques techniques existantes.
+
 ### Paper trading
 
 ```bash
@@ -319,7 +363,7 @@ src/trading_bot/
   config.py           # chargement de config.yaml + .env
   indicators.py        # SMA, RSI, ATR, rolling max/min
   market_calendar.py    # calendrier de marché (NYSE) : jours fériés, horaires, fermetures anticipées
-  state.py               # persistance JSON de l'état live (stops en cours, coupe-circuits)
+  state.py               # persistance JSON de l'état live (stops en cours, coupe-circuits, positions connues)
   data/
     historical.py       # données historiques (yfinance) pour le backtest
     market_data.py       # données récentes (Alpaca) pour le live
@@ -337,6 +381,7 @@ src/trading_bot/
     circuit_breaker.py        # coupe-circuits perte journalière / drawdown
     regime.py                  # filtre de régime de marché (SMA du benchmark)
     universe_rotation.py         # rotation périodique de l'univers tradé, par stratégie
+    symbol_track_record.py         # base persistante de performance réelle par symbole
   execution/
     broker_base.py          # interface abstraite de broker
     alpaca_broker.py          # implémentation Alpaca
@@ -350,6 +395,7 @@ src/trading_bot/
     report.py                         # rapport HTML autonome (matplotlib)
   live/
     engine.py                      # boucle live (paper/réel)
+    trade_realization.py             # détection des trades réalisés (comparaison de positions)
   cli.py                             # point d'entrée `python -m trading_bot`
 ```
 
@@ -449,3 +495,13 @@ aux autres (voir le commentaire sur `defensive_rotation` dans
   signe qu'ils sous-estiment probablement les coûts réels (spread bid-ask,
   slippage), qui pèsent proportionnellement plus sur des gains visés petits
   et fréquents qu'en swing quotidien.
+- La cotation de confiance par track record (voir [Cotation de confiance
+  par symbole](#cotation-de-confiance-par-symbole-track-record)) s'appuie,
+  côté live, sur `avg_entry_price` tel que renvoyé par le broker plutôt que
+  sur un fill exact (le prix de sortie utilisé est le dernier prix connu au
+  moment de la détection, pas le prix de fill réel — voir les limites
+  précises dans `trading_bot.live.trade_realization`). La même base
+  (`live.track_record_file`) est en outre partagée entre toutes les
+  stratégies qui l'utilisent : les stats d'un symbole tradé différemment par
+  deux stratégies se mélangeraient dans un seul score, pas de séparation par
+  stratégie pour l'instant.

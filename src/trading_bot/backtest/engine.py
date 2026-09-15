@@ -34,6 +34,7 @@ from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, app
 from trading_bot.portfolio.regime import regime_scale_series
 from trading_bot.portfolio.risk import RiskManager
 from trading_bot.portfolio.stops import StopLevel, is_triggered, update_stop
+from trading_bot.portfolio.symbol_track_record import load_track_record
 from trading_bot.portfolio.volatility_filter import volatility_scale_series
 from trading_bot.strategies.registry import build_enabled_strategies
 
@@ -138,11 +139,15 @@ def run_backtest(
     rotation_configs = {
         s.name: s.universe_rotation for s in config.strategies if s.enabled and s.universe_rotation.enabled
     }
+    track_record = None
+    if any(r.metric == "track_record" for r in rotation_configs.values()):
+        track_record = load_track_record(config.live.track_record_file)
     allocator = SignalAllocator(
         strategies_with_weights,
         allow_short=config.risk.allow_short,
         rotation_configs=rotation_configs or None,
         base_symbols=config.symbols if rotation_configs else None,
+        track_record=track_record,
     )
     exposure_series = allocator.target_exposure_series(data_by_symbol)
     atr_series = {sym: atr(df, config.risk.atr_window) for sym, df in data_by_symbol.items()}

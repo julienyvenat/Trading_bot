@@ -21,6 +21,31 @@ class Position:
     avg_entry_price: float
 
 
+@dataclass
+class PositionSnapshot:
+    """Réduction sérialisable d'une `Position`, persistée entre deux cycles
+    live (voir `trading_bot.state.LiveState.last_known_positions`) pour que
+    `trading_bot.live.trade_realization.detect_realized_trades` puisse
+    comparer une position d'un cycle à l'autre même après un redémarrage du
+    bot. Vit ici (plutôt que dans `trading_bot.live`) uniquement pour éviter
+    un import circulaire avec `trading_bot.state` (qui en a besoin, et est
+    lui-même importé par `trading_bot.live.engine`)."""
+
+    qty: float
+    avg_entry_price: float
+
+    def to_dict(self) -> dict:
+        return {"qty": self.qty, "avg_entry_price": self.avg_entry_price}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PositionSnapshot:
+        return cls(qty=data["qty"], avg_entry_price=data["avg_entry_price"])
+
+    @classmethod
+    def from_position(cls, position: Position) -> PositionSnapshot:
+        return cls(qty=position.qty, avg_entry_price=position.avg_entry_price)
+
+
 class Broker(ABC):
     @abstractmethod
     def get_account(self) -> AccountInfo: ...

@@ -1,6 +1,6 @@
 """Persistance de l'état du moteur live entre deux redémarrages.
 
-Trois choses doivent survivre à un redémarrage du bot :
+Quatre choses doivent survivre à un redémarrage du bot :
   - les stops suiveurs en cours (sinon on perdrait le "ratchet" et repartirait
     d'un stop plus large que ce qu'il devrait être) ;
   - les identifiants des ordres stop natifs posés chez le broker pour chaque
@@ -15,7 +15,14 @@ Trois choses doivent survivre à un redémarrage du bot :
   - l'état des coupe-circuits, en particulier le coupe-circuit de drawdown,
     qui est volontairement "sticky" : si le bot crashe puis redémarre après
     l'avoir déclenché, il DOIT rester arrêté plutôt que de repartir comme si
-    de rien n'était.
+    de rien n'était ;
+  - le dernier instantané connu des positions ouvertes (`last_known_positions`,
+    voir `trading_bot.live.trade_realization`), pour détecter au cycle
+    suivant ce qui a été réalisé entre-temps (clôture sur stop natif, ou
+    toute autre sortie de position) et alimenter
+    `trading_bot.portfolio.symbol_track_record` — sans ce point de
+    comparaison persistant, un redémarrage du bot ferait perdre la trace du
+    prix d'entrée des positions closes pendant l'interruption.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from trading_bot.execution.broker_base import PositionSnapshot
 from trading_bot.portfolio.circuit_breaker import RiskState
 from trading_bot.portfolio.stops import StopLevel
 
@@ -43,6 +51,7 @@ class LiveState:
     # le reposer même si le prix du stop n'a pas changé.
     stop_order_dates: dict[str, str] = field(default_factory=dict)
     risk_state: RiskState | None = None
+    last_known_positions: dict[str, PositionSnapshot] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +62,7 @@ class LiveState:
             "stop_order_ids": dict(self.stop_order_ids),
             "stop_order_dates": dict(self.stop_order_dates),
             "risk_state": self.risk_state.to_dict() if self.risk_state else None,
+            "last_known_positions": {symbol: snap.to_dict() for symbol, snap in self.last_known_positions.items()},
         }
 
     @classmethod
@@ -64,11 +74,15 @@ class LiveState:
         stop_order_ids = dict(data.get("stop_order_ids", {}))
         stop_order_dates = dict(data.get("stop_order_dates", {}))
         risk_state = RiskState.from_dict(data["risk_state"]) if data.get("risk_state") else None
+        last_known_positions = {
+            symbol: PositionSnapshot.from_dict(v) for symbol, v in data.get("last_known_positions", {}).items()
+        }
         return cls(
             trailing_stops=stops,
             stop_order_ids=stop_order_ids,
             stop_order_dates=stop_order_dates,
             risk_state=risk_state,
+            last_known_positions=last_known_positions,
         )
 
 

@@ -156,6 +156,16 @@ class LiveConfig:
     loop_interval_seconds: int
     trade_only_when_market_open: bool
     state_file: str = "state/live_state.json"
+    # Base persistante de performance réelle par symbole (voir
+    # `trading_bot.portfolio.symbol_track_record`), utilisée par une
+    # stratégie dont `universe_rotation.metric == "track_record"`. Partagée
+    # entre backtest et live (même fichier) pour que l'algorithme
+    # s'améliore avec le temps sur les DEUX : chaque cycle live y ajoute des
+    # trades réellement nouveaux, un backtest peut la lire (et, avec
+    # `--update-track-record`, y écrire) mais sans apporter d'information
+    # nouvelle en rejouant une période déjà connue — voir la docstring du
+    # module pour cet avertissement.
+    track_record_file: str = "state/symbol_track_record.json"
 
 
 @dataclass

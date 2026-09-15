@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from trading_bot.execution.broker_base import PositionSnapshot
 from trading_bot.portfolio.circuit_breaker import RiskState
 from trading_bot.portfolio.stops import StopLevel
 from trading_bot.state import LiveState, load_state, save_state
@@ -48,3 +49,13 @@ def test_save_preserves_sticky_drawdown_halt(tmp_path: Path):
 
     reloaded = load_state(path)
     assert reloaded.risk_state.drawdown_halted is True
+
+
+def test_last_known_positions_roundtrip(tmp_path: Path):
+    path = tmp_path / "live_state.json"
+    original = LiveState(last_known_positions={"TSLA": PositionSnapshot(qty=10.0, avg_entry_price=250.5)})
+
+    save_state(path, original)
+    loaded = load_state(path)
+
+    assert loaded.last_known_positions == {"TSLA": PositionSnapshot(qty=10.0, avg_entry_price=250.5)}

@@ -50,6 +50,7 @@ from trading_bot.execution.alpaca_broker import AlpacaBroker
 from trading_bot.execution.broker_base import Broker
 from trading_bot.execution.rebalancer import execute_orders, plan_orders
 from trading_bot.indicators import atr
+from trading_bot.live.trade_realization import detect_realized_trades, snapshot_positions
 from trading_bot.logger import get_logger
 from trading_bot.market_calendar import MarketCalendar
 from trading_bot.portfolio.allocator import SignalAllocator
@@ -57,6 +58,7 @@ from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, app
 from trading_bot.portfolio.regime import latest_regime_scale
 from trading_bot.portfolio.risk import RiskManager
 from trading_bot.portfolio.stops import StopLevel, update_stop
+from trading_bot.portfolio.symbol_track_record import load_track_record, merge_trades, save_track_record
 from trading_bot.portfolio.volatility_filter import latest_volatility_scale
 from trading_bot.state import LiveState, load_state, save_state
 from trading_bot.strategies.registry import build_enabled_strategies
@@ -66,6 +68,20 @@ logger = get_logger()
 # Ne dort jamais plus de 30 minutes d'un coup en dehors des heures de marché,
 # pour rester réactif (logs réguliers, arrêt propre du process, etc.).
 MAX_SLEEP_CHUNK_SECONDS = 1800
+
+
+def _update_track_record(config: AppConfig, trades: list) -> None:
+    """Alimente la base persistante de performance par symbole (voir
+    `trading_bot.portfolio.symbol_track_record`) avec les trades RÉALISÉS ce
+    cycle — c'est la façon dont l'algorithme "apprend" dans le temps sur des
+    données réellement nouvelles (contrairement à un backtest rejoué, voir
+    la docstring du module). No-op si `trades` est vide (pas d'I/O inutile)."""
+    if not trades:
+        return
+    path = config.live.track_record_file
+    updated = merge_trades(load_track_record(path), trades)
+    save_track_record(path, updated)
+    logger.info("Base de suivi par symbole mise à jour (%s) : %d trade(s) réalisé(s) ce cycle.", path, len(trades))
 
 
 def _cancel_stop_order(symbol: str, state: LiveState, broker: Broker, dry_run: bool) -> None:
@@ -188,6 +204,17 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     last_prices = {symbol: broker.get_last_price(symbol) for symbol in price_symbols}
     equity = account.equity
 
+    # Trades RÉALISÉS depuis la fin du cycle précédent (ex: un stop natif
+    # déclenché entre deux cycles, voir trading_bot.live.trade_realization),
+    # détectés en comparant le dernier instantané persisté aux positions
+    # fraîchement lues ci-dessus. Alimente `trading_bot.portfolio.
+    # symbol_track_record` en fin de cycle (voir plus bas), sur TOUS les
+    # chemins de sortie de cette fonction (y compris le flatten sur
+    # coupe-circuit ci-dessous) pour ne jamais perdre un trade réalisé.
+    now_ts = pd.Timestamp.now(tz="UTC")
+    positions_before_this_cycle_orders = positions
+    realized_trades = detect_realized_trades(state.last_known_positions, positions, last_prices, now_ts)
+
     # Le stop suiveur est désormais un ordre natif posé chez le broker (voir
     # plus bas) : s'il n'y a plus de position pour un symbole qu'on suivait,
     # c'est que son stop a fillé (ou que la position a été close autrement)
@@ -223,6 +250,12 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
                 _cancel_stop_order(symbol, state, broker, dry_run)
         _close_all_positions(current_qty, broker, dry_run, reason="coupe-circuit drawdown")
         state.trailing_stops.clear()
+        # `state.last_known_positions` n'est PAS mis à jour ici (volontaire) :
+        # le flatten qui vient d'être déclenché sera détecté comme réalisé au
+        # PROCHAIN cycle, par comparaison avec cet instantané resté inchangé
+        # (positions d'avant flatten) — plus simple que de re-vérifier ici
+        # que chaque ordre de flatten a bien fillé avant de l'enregistrer.
+        _update_track_record(config, realized_trades)
         return state
 
     # 2) Signaux multi-stratégies -> exposition cible, modulée par le filtre
@@ -342,8 +375,14 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
         if not dry_run:
             # Relit les positions réelles après exécution : le stop natif doit
             # porter sur la quantité effectivement détenue, pas une estimation
-            # (voir limite connue en tête de fichier).
-            current_qty = {symbol: pos.qty for symbol, pos in broker.get_positions().items()}
+            # (voir limite connue en tête de fichier). Capture aussi les
+            # trades réalisés par CE rebalancement (réduction/clôture), voir
+            # trading_bot.live.trade_realization.
+            positions = broker.get_positions()
+            current_qty = {symbol: pos.qty for symbol, pos in positions.items()}
+            realized_trades += detect_realized_trades(
+                snapshot_positions(positions_before_this_cycle_orders), positions, last_prices, now_ts
+            )
     else:
         logger.info("Aucun ordre à passer ce cycle (portefeuille déjà à la cible).")
 
@@ -386,6 +425,9 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
         if stop_moved or symbol not in state.stop_order_ids or stop_expired:
             _cancel_stop_order(symbol, state, broker, dry_run)
             _submit_stop_order(symbol, qty, new_stop, state, broker, dry_run, today_str)
+
+    state.last_known_positions = snapshot_positions(positions)
+    _update_track_record(config, realized_trades)
 
     return state
 
