@@ -135,7 +135,15 @@ def run_backtest(
     if not strategies_with_weights:
         raise ValueError("Aucune stratégie active dans la configuration.")
 
-    allocator = SignalAllocator(strategies_with_weights, allow_short=config.risk.allow_short)
+    rotation_configs = {
+        s.name: s.universe_rotation for s in config.strategies if s.enabled and s.universe_rotation.enabled
+    }
+    allocator = SignalAllocator(
+        strategies_with_weights,
+        allow_short=config.risk.allow_short,
+        rotation_configs=rotation_configs or None,
+        base_symbols=config.symbols if rotation_configs else None,
+    )
     exposure_series = allocator.target_exposure_series(data_by_symbol)
     atr_series = {sym: atr(df, config.risk.atr_window) for sym, df in data_by_symbol.items()}
 

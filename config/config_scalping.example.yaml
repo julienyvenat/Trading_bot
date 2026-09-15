@@ -58,6 +58,46 @@ strategies:
       window: 20 # nombre de BOUGIES (pas de jours) : 20 * 5min = ~1h40
       num_std: 2.0
       min_band_width_pct: 0.0
+    # Rotation périodique du sous-ensemble réellement tradé (voir
+    # `UniverseRotationConfig` / `trading_bot.portfolio.universe_rotation`) :
+    # plutôt que de rester indéfiniment sur les 6 titres fixes de
+    # `universe.symbols` ci-dessus (qui peuvent devenir peu intéressants une
+    # fois leur volatilité retombée), la stratégie choisit, parmi CE pool de
+    # candidats, ceux dont la confiance (`min_confidence`) atteint le seuil —
+    # un NOMBRE VARIABLE de titres selon les périodes, pas un compte fixe :
+    # inutile de forcer une position sur un candidat médiocre juste pour
+    # compléter un quota. `universe.symbols` reste utilisé pour la
+    # récupération de prix/l'affichage, mais n'est PAS le pool tradé par
+    # cette stratégie une fois la rotation active (voir
+    # `SignalAllocator.__init__`) : d'où sa duplication ici.
+    # ⚠️ Backtest/optimize/walk-forward uniquement pour l'instant : `paper`
+    # refuse de démarrer tant qu'une stratégie a `universe_rotation.enabled`
+    # (voir le garde-fou dans `trading_bot.cli.cmd_paper`) pour ne pas casser
+    # la parité backtest/live en tradant silencieusement moins de titres
+    # qu'en backtest.
+    universe_rotation:
+      enabled: true
+      candidates:
+        - TSLA
+        - AMD
+        - SMCI
+        - COIN
+        - MSTR
+        - SOXL
+        - NVDA
+        - PLTR
+        - RIVN
+        - ARM
+      metric: volatility # écart-type des rendements : cohérent avec le besoin d'amplitude du scalping/retour à la moyenne
+      # Rang percentile moyen (sur `metric`, parmi les 10 candidats) requis
+      # sur les `stability_window` dernières réévaluations pour être retenu.
+      # 0.6 = il faut avoir été, en moyenne, dans la meilleure moitié
+      # supérieure du pool de façon répétée (pas juste une fois par hasard).
+      min_confidence: 0.6
+      stability_window: 3 # moyenne sur les 3 dernières réévaluations
+      lookback_window: 78 # ~1 séance de bougies 5min (78 * 5min ≈ 6h30, horaires NYSE)
+      rebalance_every: 78 # réévalue le classement une fois par séance
+
 
   # Les stratégies suivantes ont été conçues et calibrées pour du swing
   # quotidien (config/config.yaml) : leurs fenêtres en "jours" n'ont plus le

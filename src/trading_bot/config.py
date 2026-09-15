@@ -14,11 +14,60 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "config.y
 
 
 @dataclass
+class UniverseRotationConfig:
+    """Rotation périodique du sous-ensemble de symboles tradé par UNE
+    stratégie (voir `trading_bot.portfolio.universe_rotation`).
+
+    Désactivée par défaut (rétrocompatible : une config existante qui ne
+    déclare pas `universe_rotation` sous une stratégie continue de la faire
+    porter sur `universe.symbols` en entier, sans aucun changement de
+    comportement). Quand activée, la stratégie ne considère plus
+    `universe.symbols` mais exclusivement `candidates` (un pool dédié,
+    éventuellement plus large et distinct de l'univers principal), et n'est
+    réellement exposée qu'aux `top_n` d'entre eux jugés les plus intéressants
+    par `metric`, réévalués tous les `rebalance_every` bougies — pour éviter
+    de rester indéfiniment sur des titres devenus peu intéressants (ex: une
+    volatilité qui s'est tarie) simplement parce qu'ils étaient dans la
+    config au départ.
+    """
+
+    enabled: bool = False
+    # Pool de symboles candidats, propre à cette stratégie. Peut contenir des
+    # symboles absents de `universe.symbols` : ils sont alors récupérés en
+    # plus (voir `trading_bot.cli`) uniquement pour cette rotation.
+    candidates: list[str] = field(default_factory=list)
+    # "volatility" (écart-type des rendements, favorise les titres qui
+    # bougent le plus, pertinent pour une stratégie de scalping/retour à la
+    # moyenne), "momentum" (rendement glissant, pertinent pour une stratégie
+    # de suivi de tendance) ou "dollar_volume" (liquidité, pour éviter les
+    # titres trop étroits). Dans les 3 cas, "plus haut = plus intéressant".
+    metric: str = "volatility"
+    # Sélection par SEUIL de qualité plutôt que par compte fixe (nombre de
+    # titres retenus volontairement variable dans le temps, voir
+    # `trading_bot.portfolio.universe_rotation.compute_confidence`) : un
+    # candidat est retenu si sa "confiance" — la moyenne de son rang
+    # percentile sur `metric` parmi les autres candidats, sur les
+    # `stability_window` dernières réévaluations — atteint `min_confidence`
+    # (échelle [0, 1], 1.0 = systématiquement le meilleur candidat du pool).
+    # Le nombre de titres réellement ouverts reste de toute façon borné en
+    # aval par `risk.max_open_positions`/`max_gross_exposure_pct`.
+    min_confidence: float = 0.6
+    # Moyenner sur plusieurs réévaluations plutôt que de ne regarder que la
+    # dernière évite de retenir un candidat qui n'aurait été intéressant
+    # qu'une seule fois par hasard (ex: un pic de volatilité isolé) : il faut
+    # avoir été bon de façon répétée, pas juste au dernier instant T.
+    stability_window: int = 3
+    lookback_window: int = 20
+    rebalance_every: int = 20
+
+
+@dataclass
 class StrategyConfig:
     name: str
     enabled: bool
     weight: float
     params: dict[str, Any] = field(default_factory=dict)
+    universe_rotation: UniverseRotationConfig = field(default_factory=UniverseRotationConfig)
 
 
 @dataclass
@@ -163,6 +212,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             enabled=s.get("enabled", True),
             weight=float(s.get("weight", 1.0)),
             params=s.get("params", {}) or {},
+            universe_rotation=UniverseRotationConfig(**(s.get("universe_rotation", {}) or {})),
         )
         for s in raw.get("strategies", [])
     ]

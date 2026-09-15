@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from trading_bot.config import UniverseRotationConfig
+from trading_bot.portfolio.universe_rotation import compute_membership
 from trading_bot.strategies.base import Strategy
 
 
@@ -44,9 +46,31 @@ class SignalAllocator:
     Les deux types se combinent de la même façon une fois leur signal calculé.
     """
 
-    def __init__(self, strategies_with_weights: list[tuple[Strategy, float]], allow_short: bool = False) -> None:
+    def __init__(
+        self,
+        strategies_with_weights: list[tuple[Strategy, float]],
+        allow_short: bool = False,
+        rotation_configs: dict[str, UniverseRotationConfig] | None = None,
+        base_symbols: list[str] | None = None,
+    ) -> None:
+        """`rotation_configs` (optionnel, clé = `Strategy.name`) : pour une
+        stratégie qui y figure avec `enabled=True`, restreint son univers à
+        son propre pool `candidates` (voir `UniverseRotationConfig`) au lieu
+        de tout `data_by_symbol`, et n'active que ceux dont la confiance
+        atteint `min_confidence` à chaque instant (voir
+        `trading_bot.portfolio.universe_rotation`).
+        `base_symbols` : univers par défaut des AUTRES stratégies (sans
+        rotation active) quand `data_by_symbol` contient aussi des candidats
+        de rotation ajoutés pour une autre stratégie — sans ça, ces candidats
+        supplémentaires (potentiellement hors de l'univers configuré)
+        fuiraient silencieusement dans le calcul des stratégies qui n'ont
+        rien demandé. `None` = pas de restriction, tout `data_by_symbol` est
+        utilisé tel quel (comportement historique, inchangé tant qu'aucune
+        rotation n'est configurée nulle part)."""
         self.strategies_with_weights = strategies_with_weights
         self.allow_short = allow_short
+        self.rotation_configs = rotation_configs or {}
+        self.base_symbols = base_symbols
 
     def _signals_by_strategy(self, data_by_symbol: dict[str, pd.DataFrame]) -> list[tuple[float, dict[str, pd.Series]]]:
         """Pour chaque stratégie active, calcule sa série de signal complète
@@ -54,9 +78,26 @@ class SignalAllocator:
         cross-sectionnelle), une seule fois. Renvoie [(poids, {symbole: série})]."""
         per_strategy: list[tuple[float, dict[str, pd.Series]]] = []
         for strategy, weight in self.strategies_with_weights:
-            universe_signals = strategy.generate_universe_signals(data_by_symbol)
+            rotation = self.rotation_configs.get(strategy.name)
+            if rotation and rotation.enabled:
+                symbols = [s for s in rotation.candidates if s in data_by_symbol]
+            elif self.base_symbols is not None:
+                symbols = [s for s in self.base_symbols if s in data_by_symbol]
+            else:
+                symbols = list(data_by_symbol)
+            subset = {s: data_by_symbol[s] for s in symbols}
+
+            universe_signals = strategy.generate_universe_signals(subset)
             if universe_signals is None:
-                universe_signals = {symbol: strategy.generate_signals(df) for symbol, df in data_by_symbol.items()}
+                universe_signals = {symbol: strategy.generate_signals(df) for symbol, df in subset.items()}
+
+            if rotation and rotation.enabled:
+                membership = compute_membership(subset, rotation)
+                universe_signals = {
+                    symbol: signal * membership[symbol].reindex(signal.index).fillna(0.0)
+                    for symbol, signal in universe_signals.items()
+                }
+
             per_strategy.append((weight, universe_signals))
         return per_strategy
 

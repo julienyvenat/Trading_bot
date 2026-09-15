@@ -74,6 +74,33 @@ def _fetch_filter_benchmarks(config: AppConfig, data_by_symbol: dict, logger) ->
     return benchmark_df, volatility_benchmark_df
 
 
+def _fetch_rotation_candidates(config: AppConfig, data_by_symbol: dict, logger) -> dict:
+    """Récupère, en plus de `universe.symbols`, les pools de candidats de
+    rotation déclarés sous `strategies: -> universe_rotation.candidates`
+    (voir `UniverseRotationConfig`) qui ne sont pas déjà dans `data_by_symbol`.
+    Renvoie `data_by_symbol` complété (nouveau dict, ne mute pas l'original).
+    Sans stratégie à rotation active, renvoie `data_by_symbol` inchangé."""
+    missing = {
+        symbol
+        for s in config.strategies
+        if s.enabled and s.universe_rotation.enabled
+        for symbol in s.universe_rotation.candidates
+        if symbol not in data_by_symbol
+    }
+    if not missing:
+        return data_by_symbol
+
+    logger.info("Téléchargement des pools de candidats de rotation : %s...", ", ".join(sorted(missing)))
+    extra = _fetch_data(config, sorted(missing))
+    still_missing = missing - set(extra)
+    if still_missing:
+        logger.warning(
+            "Candidat(s) de rotation introuvable(s), ignoré(s) pour la sélection périodique : %s.",
+            ", ".join(sorted(still_missing)),
+        )
+    return {**data_by_symbol, **extra}
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     from trading_bot.backtest.engine import run_backtest
 
@@ -92,6 +119,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     benchmark_df, volatility_benchmark_df = _fetch_filter_benchmarks(config, data_by_symbol, logger)
+    data_by_symbol = _fetch_rotation_candidates(config, data_by_symbol, logger)
 
     logger.info("Lancement du backtest sur %d symboles...", len(data_by_symbol))
     result = run_backtest(
@@ -138,6 +166,7 @@ def cmd_walk_forward(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     benchmark_df, volatility_benchmark_df = _fetch_filter_benchmarks(config, data_by_symbol, logger)
+    data_by_symbol = _fetch_rotation_candidates(config, data_by_symbol, logger)
 
     param_grids = None
     if args.optimize:
@@ -203,6 +232,7 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     benchmark_df, volatility_benchmark_df = _fetch_filter_benchmarks(config, data_by_symbol, logger)
+    data_by_symbol = _fetch_rotation_candidates(config, data_by_symbol, logger)
 
     metric = args.metric or config.optimization.metric
     logger.info("Lancement de la recherche par grille (métrique optimisée : %s)...", metric)
@@ -242,6 +272,18 @@ def cmd_paper(args: argparse.Namespace) -> None:
 
     logger = setup_logging()
     config = load_config(args.config)
+
+    rotating_strategies = [s.name for s in config.strategies if s.enabled and s.universe_rotation.enabled]
+    if rotating_strategies:
+        logger.error(
+            "`universe_rotation` est activé pour %s mais n'est pour l'instant supporté qu'en "
+            "backtest/optimize/walk-forward (trading_bot.portfolio.allocator), pas en live : "
+            "démarrer `paper` tel quel traderait uniquement `universe.symbols` en ignorant la "
+            "rotation, ce qui romprait la parité backtest/live. Désactive `universe_rotation` "
+            "sur ces stratégies avant de passer en paper trading, ou attends le support live.",
+            ", ".join(rotating_strategies),
+        )
+        sys.exit(1)
 
     if args.once:
         from trading_bot.config import load_alpaca_credentials

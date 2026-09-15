@@ -68,6 +68,44 @@ strategies:
     params:
       lookback_window: 55
       exit_window: 20
+    # Rotation périodique du sous-ensemble réellement tradé par CETTE
+    # stratégie (voir `UniverseRotationConfig` /
+    # `trading_bot.portfolio.universe_rotation`), avec un objectif
+    # délibérément différent de celui utilisé pour `bollinger_scalping` dans
+    # `config_scalping.example.yaml` : le scalping a besoin d'AMPLITUDE
+    # (`metric: volatility`, fenêtre ~1 séance) pour dépasser ses coûts de
+    # transaction sur des mouvements courts, alors qu'une stratégie de
+    # suivi de tendance a besoin de DIRECTION soutenue (`metric: momentum`,
+    # fenêtre alignée sur `lookback_window` ci-dessus) : un titre très
+    # volatil mais sans tendance nette serait un mauvais candidat ici, alors
+    # qu'il serait exactement ce que cherche le scalping. Pool de candidats
+    # volontairement plus large que `universe.symbols` ci-dessus (les mêmes
+    # titres, GLD compris pour ne rien retirer par rapport à avant, + quelques
+    # large caps/ETF liquides supplémentaires), pour laisser la rotation
+    # choisir au-delà du cœur d'univers fixe.
+    universe_rotation:
+      enabled: true
+      candidates:
+        - SPY
+        - QQQ
+        - AAPL
+        - MSFT
+        - NVDA
+        - GLD
+        - XLK
+        - XLE
+        - XLF
+        - XLV
+        - AMZN
+        - GOOGL
+        - META
+        - XLY
+        - XLI
+      metric: momentum
+      min_confidence: 0.6
+      stability_window: 2 # 2 réévaluations mensuelles : une tendance récente doit se confirmer, pas juste apparaître une fois
+      lookback_window: 55 # aligné sur `params.lookback_window` ci-dessus : même horizon de tendance
+      rebalance_every: 21 # ~1 mois de bougies journalières
 
   # Rotation sectorielle / force relative : cross-sectionnelle (compare les
   # symboles entre eux plutôt que de juger chacun dans l'absolu), pour une
