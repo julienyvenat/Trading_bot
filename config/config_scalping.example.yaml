@@ -21,12 +21,21 @@
 #     avant de passer ceci en argent réel.
 
 universe:
+  # Titres nettement plus volatils que le SPY/QQQ/AAPL/MSFT/NVDA du bot
+  # "swing" (config.yaml) : le scalping vise des mouvements petits et
+  # fréquents, qui ont besoin d'une vraie volatilité intraday pour dépasser
+  # les coûts de transaction. Vol annualisée approximative mesurée sur les
+  # bougies 5 min (17 août -> 14 sept. 2026, à titre indicatif, ça bouge
+  # dans le temps) : TSLA ~44%, AMD ~53%, SMCI ~71%, COIN ~73%, MSTR ~76%,
+  # SOXL (ETF semiconducteurs à effet de levier x3) ~130% — à comparer aux
+  # ~20-30% habituels de SPY/QQQ/AAPL/MSFT.
   symbols:
-    - SPY
-    - QQQ
-    - AAPL
-    - MSFT
-    - NVDA
+    - TSLA
+    - AMD
+    - SMCI
+    - COIN
+    - MSTR
+    - SOXL
 
   # Granularité intraday : voir trading_bot.data.historical
   # (yfinance_interval_for_timeframe) et trading_bot.data.market_data
@@ -83,11 +92,25 @@ risk:
   allow_short: false
   max_gross_exposure_pct: 0.90
   max_position_weight_pct: 0.25
-  risk_per_trade_pct: 0.01
-  # Stop plus serré qu'en swing quotidien (2.5 par défaut dans
-  # config/config.yaml) : cohérent avec des mouvements visés plus modestes
-  # et plus fréquents.
-  atr_stop_multiple: 1.5
+  # Réduit par rapport au 0.01 (1%) de config/config.yaml : l'univers
+  # ci-dessus est ~2.5-4x plus volatil (vol annualisée ~44-130% contre
+  # ~20-30% pour SPY/QQQ/AAPL/MSFT). Le dimensionnement par ATR (voir
+  # `RiskManager.size_single`) réduit déjà le poids alloué à chaque symbole
+  # proportionnellement à SON ATR propre, mais avec max_open_positions=5 sur
+  # des titres aussi corrélés entre eux (tech/semis/crypto à beta élevé), un
+  # jour de stress qui stoppe plusieurs positions à la fois peut cumuler un
+  # risque bien supérieur à 1 x risk_per_trade_pct. Abaissé à 0.4% pour que
+  # même 5 positions stoppées le même jour (~2% cumulé) restent sous
+  # max_daily_loss_pct (3%), et laissent de la marge avant max_drawdown_pct
+  # (20%, sticky : voir trading_bot.portfolio.circuit_breaker) sur une
+  # séquence de plusieurs semaines difficiles.
+  risk_per_trade_pct: 0.004
+  # Resserré par rapport à 1.5 : limite la perte encaissée quand le poids
+  # calculé par ATR est plafonné par max_position_weight_pct (auquel cas le
+  # risque effectif au stop redevient proportionnel à atr_stop_multiple, pas
+  # seulement à risk_per_trade_pct — voir la docstring de
+  # `trading_bot.portfolio.risk`).
+  atr_stop_multiple: 1.2
   atr_window: 14 # 14 bougies de 5min = ~70 minutes
   max_open_positions: 5
   max_daily_loss_pct: 0.03
