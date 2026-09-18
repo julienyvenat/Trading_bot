@@ -120,6 +120,16 @@ def save_track_record(path: str | Path, record: SymbolTrackRecord) -> None:
         json.dump(record.to_dict(), f, indent=2)
 
 
+def _as_utc(ts: pd.Timestamp) -> pd.Timestamp:
+    """Normalise `ts` en tz-aware UTC. Les `exit_date` issues du backtest
+    sont naïves (bougies journalières/horaires sans fuseau), celles issues
+    du live sont tz-aware (voir `trading_bot.live.trade_realization`) : sans
+    cette normalisation, comparer les deux lève `TypeError: Cannot compare
+    tz-naive and tz-aware timestamps` dès qu'un symbole cumule une marque
+    d'eau backtest et un trade live (ou l'inverse)."""
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
 def merge_trades(record: SymbolTrackRecord, trades: list[Trade]) -> SymbolTrackRecord:
     """Intègre `trades` dans `record` (fonction pure, renvoie un nouveau
     `SymbolTrackRecord`). Idempotent : un trade dont `exit_date` est
@@ -135,13 +145,15 @@ def merge_trades(record: SymbolTrackRecord, trades: list[Trade]) -> SymbolTrackR
     # paraître le second "déjà connu" alors qu'il ne l'était pas avant cet
     # appel.
     watermarks_before = {
-        symbol: pd.Timestamp(stats.last_exit_date) for symbol, stats in by_symbol.items() if stats.last_exit_date
+        symbol: _as_utc(pd.Timestamp(stats.last_exit_date))
+        for symbol, stats in by_symbol.items()
+        if stats.last_exit_date
     }
 
-    for trade in sorted(trades, key=lambda t: t.exit_date):
+    for trade in sorted(trades, key=lambda t: _as_utc(t.exit_date)):
         stats = by_symbol.setdefault(trade.symbol, SymbolStats())
         watermark = watermarks_before.get(trade.symbol)
-        if watermark is not None and trade.exit_date <= watermark:
+        if watermark is not None and _as_utc(trade.exit_date) <= watermark:
             continue
 
         stats.trade_count += 1

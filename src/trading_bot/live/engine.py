@@ -410,9 +410,15 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
 
         # Quantité réellement détenue après le rebalancement de ce cycle. En
         # dry-run (aucun ordre réel), on estime la quantité visée pour quand
-        # même journaliser un stop plausible.
+        # même journaliser un stop plausible. En réel, une quantité nulle ici
+        # signifie que l'ordre de rebalancement n'a pas (encore) été reflété
+        # côté broker — voire a été rejeté après plusieurs tentatives, voir
+        # `execution.rebalancer._submit_market_order_with_retry` — et il ne
+        # faut surtout pas fabriquer un stop sur une position qui n'existe
+        # pas réellement : le cycle suivant reposera le stop dès que la
+        # position sera confirmée.
         qty = current_qty.get(symbol, 0.0)
-        if qty == 0 and price:
+        if qty == 0 and price and dry_run:
             qty = (target_weight * equity) / price
         if qty == 0:
             continue

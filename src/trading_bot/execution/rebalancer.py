@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from trading_bot.execution.broker_base import Broker
@@ -13,6 +14,16 @@ logger = get_logger()
 # En dessous de ce delta (en valeur, $), on ne passe pas d'ordre : évite le
 # bruit de micro-rebalancements pour des variations négligeables.
 MIN_ORDER_VALUE = 1.0
+
+# Nombre de tentatives et délai avant retry en cas de rejet transitoire par
+# Alpaca ("potential wash trade detected") : `run_once`
+# (`trading_bot.live.engine`) annule le stop natif d'un symbole juste avant
+# de soumettre son ordre de rebalancement, mais cette annulation n'est pas
+# forcément déjà reflétée côté broker au moment de la soumission — Alpaca
+# voit alors encore l'ancien stop comme un ordre ouvert de sens opposé et
+# rejette le nouvel ordre.
+_ORDER_MAX_ATTEMPTS = 3
+_ORDER_RETRY_DELAY_SECONDS = 2.0
 
 
 @dataclass
@@ -56,6 +67,10 @@ def plan_orders(
 
 
 def execute_orders(orders: list[PlannedOrder], broker: Broker, dry_run: bool = False) -> None:
+    """Soumet chaque ordre planifié. Un rejet sur UN symbole (voir
+    `_submit_market_order_with_retry`) ne doit jamais empêcher la soumission
+    des AUTRES ordres du cycle, ni la suite du cycle côté appelant (pose des
+    stops, mise à jour du suivi par symbole...)."""
     for order in orders:
         logger.info(
             "%s %s %.4f (%s $%.2f)",
@@ -66,4 +81,31 @@ def execute_orders(orders: list[PlannedOrder], broker: Broker, dry_run: bool = F
             order.notional_value,
         )
         if not dry_run:
+            _submit_market_order_with_retry(order, broker)
+
+
+def _submit_market_order_with_retry(order: PlannedOrder, broker: Broker) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, _ORDER_MAX_ATTEMPTS + 1):
+        try:
             broker.submit_market_order(order.symbol, order.qty, order.side)
+            return
+        except Exception as exc:  # noqa: BLE001 - on catégorise via retry, pas via type
+            last_error = exc
+            if attempt < _ORDER_MAX_ATTEMPTS:
+                logger.warning(
+                    "Échec de l'ordre de rebalancement sur %s (tentative %d/%d), nouvelle tentative dans %.0fs : %s",
+                    order.symbol,
+                    attempt,
+                    _ORDER_MAX_ATTEMPTS,
+                    _ORDER_RETRY_DELAY_SECONDS,
+                    exc,
+                )
+                time.sleep(_ORDER_RETRY_DELAY_SECONDS)
+
+    logger.error(
+        "Impossible de soumettre l'ordre de rebalancement sur %s après %d tentatives, ordre abandonné ce cycle : %s",
+        order.symbol,
+        _ORDER_MAX_ATTEMPTS,
+        last_error,
+    )

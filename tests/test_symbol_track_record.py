@@ -78,6 +78,26 @@ def test_merge_trades_appends_genuinely_new_trades_after_watermark():
     assert record.by_symbol["TSLA"].last_exit_date == "2024-02-01T00:00:00"
 
 
+def test_merge_trades_handles_mixed_naive_and_tz_aware_exit_dates():
+    """Régression : une marque d'eau posée par un backtest (`exit_date`
+    naïve) ne doit pas faire planter la comparaison avec un trade LIVE
+    (`exit_date` tz-aware UTC, voir `trading_bot.live.trade_realization`),
+    et inversement."""
+    naive_first_window = [_trade("TSLA", "2024-01-01", pnl=50.0)]
+    record = merge_trades(SymbolTrackRecord(), naive_first_window)
+
+    live_trade = _trade("TSLA", "2024-02-01", pnl=30.0)
+    live_trade.exit_date = live_trade.exit_date.tz_localize("UTC")
+    record = merge_trades(record, [live_trade])
+
+    assert record.by_symbol["TSLA"].trade_count == 2
+
+    later_naive = [_trade("TSLA", "2024-03-01", pnl=-5.0)]
+    record = merge_trades(record, later_naive)
+
+    assert record.by_symbol["TSLA"].trade_count == 3
+
+
 def test_merge_trades_keeps_symbols_independent():
     trades = [_trade("TSLA", "2024-01-01", pnl=50.0), _trade("AMD", "2024-01-01", pnl=-10.0)]
     record = merge_trades(SymbolTrackRecord(), trades)

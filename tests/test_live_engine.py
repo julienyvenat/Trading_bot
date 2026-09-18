@@ -253,6 +253,44 @@ def test_run_once_survives_stop_order_rejection_on_one_symbol(monkeypatch, uptre
     assert "UP" not in state.stop_order_ids
 
 
+def test_run_once_survives_rebalance_order_rejection_on_one_symbol(monkeypatch, uptrend_bars):
+    """Régression : un ordre de rebalancement rejeté par Alpaca ("potential
+    wash trade detected", voir `execution.rebalancer._submit_market_order_with_retry`)
+    faisait planter tout `run_once` avant même d'atteindre la pose des stops
+    ou la sauvegarde d'état — aucun AUTRE symbole n'était alors rebalancé ni
+    protégé ce cycle-là. Le rejet d'un symbole ne doit affecter que lui."""
+    config = make_two_symbol_config()
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(
+        engine_module,
+        "fetch_latest_bars",
+        lambda symbols, timeframe, credentials: {"UP": uptrend_bars, "UP2": uptrend_bars},
+    )
+    monkeypatch.setattr(engine_module.time, "sleep", lambda seconds: None)  # pas d'attente réelle en test
+
+    last_price = float(uptrend_bars["close"].iloc[-1])
+    broker = FakeBroker(equity=100_000.0, positions={}, prices={"UP": last_price, "UP2": last_price})
+
+    real_submit = broker.submit_market_order
+
+    def failing_submit(symbol, qty, side):
+        if symbol == "UP":
+            raise RuntimeError("potential wash trade detected")
+        return real_submit(symbol, qty, side)
+
+    broker.submit_market_order = failing_submit
+
+    state = engine_module.run_once(config, broker, dry_run=False, state=LiveState())
+
+    # UP2 a bien été rebalancé et protégé malgré l'échec sur UP.
+    assert "UP2" in state.stop_order_ids
+    assert "UP2" in broker.positions
+    # UP a échoué après plusieurs tentatives mais n'a pas fait planter le cycle
+    # (donc pas de position ouverte ni de stop pour lui).
+    assert "UP" not in broker.positions
+    assert "UP" not in state.stop_order_ids
+
+
 def test_run_once_renews_stop_order_on_new_trading_day_even_if_price_unchanged(monkeypatch, uptrend_bars):
     """Les stops natifs sont posés en TimeInForce.DAY (obligatoire côté
     Alpaca pour une quantité fractionnaire) : ils expirent donc à la clôture
