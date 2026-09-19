@@ -392,3 +392,48 @@ def test_run_once_does_not_touch_track_record_when_nothing_realized(monkeypatch,
     engine_module.run_once(config, broker, dry_run=False, state=LiveState())
 
     assert not (tmp_path / "track_record.json").exists()
+
+
+def test_run_once_uses_yfinance_instead_of_alpaca_when_broker_is_manual(monkeypatch, uptrend_bars):
+    """`live.broker: "manual"` (PEA sans API, voir `ManualBroker`) doit
+    récupérer les bougies via yfinance, jamais via Alpaca (qui ne couvre pas
+    les actions européennes) : `load_alpaca_credentials`/`fetch_latest_bars`
+    ne doivent pas être appelés dans ce mode."""
+    config = make_config()
+    config.live.broker = "manual"
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("Alpaca ne doit pas être sollicité en mode `live.broker: manual`.")
+
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", _fail)
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", _fail)
+    monkeypatch.setattr(
+        "trading_bot.data.historical.fetch_latest_data", lambda symbols, interval: {"UP": uptrend_bars}
+    )
+
+    broker = FakeBroker(equity=100_000.0, positions={}, prices={"UP": float(uptrend_bars["close"].iloc[-1])})
+
+    engine_module.run_once(config, broker, dry_run=False, state=LiveState())  # ne doit pas lever
+
+
+def test_build_broker_returns_manual_broker_when_configured(tmp_path):
+    from trading_bot.execution.manual_broker import ManualBroker
+
+    account_file = tmp_path / "account.json"
+    account_file.write_text('{"cash": 1000.0, "positions": {}}')
+
+    config = make_config()
+    config.live.broker = "manual"
+    config.live.manual.account_file = str(account_file)
+
+    broker = engine_module.build_broker(config)
+
+    assert isinstance(broker, ManualBroker)
+
+
+def test_build_broker_rejects_unknown_broker_name():
+    config = make_config()
+    config.live.broker = "does-not-exist"
+
+    with pytest.raises(ValueError, match="does-not-exist"):
+        engine_module.build_broker(config)

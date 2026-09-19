@@ -94,6 +94,7 @@ def test_shipped_configs_still_load():
     charger sans erreur après l'ajout de `universe_rotation` au schéma."""
     load_config(REPO_ROOT / "config" / "config.yaml")
     load_config(REPO_ROOT / "config" / "config_intraday.example.yaml")
+    load_config(REPO_ROOT / "config" / "config_pea_fortuneo.example.yaml")
 
 
 def test_data_source_defaults_to_yfinance_when_absent(tmp_path):
@@ -113,3 +114,36 @@ def test_data_source_parses_alpaca(tmp_path):
     config = load_config(config_path)
 
     assert config.backtest.data_source == "alpaca"
+
+
+def test_live_broker_defaults_to_alpaca_when_absent(tmp_path):
+    """Rétrocompatibilité : une config existante sans `live.broker` doit
+    continuer à démarrer un `AlpacaBroker`, sans aucun changement de
+    comportement."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_MINIMAL_YAML)
+    config = load_config(config_path)
+
+    assert config.live.broker == "alpaca"
+    assert config.live.manual.account_file == "state/manual_account.json"
+
+
+def test_live_broker_parses_manual_section(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _MINIMAL_YAML.replace(
+            "trade_only_when_market_open: true",
+            'trade_only_when_market_open: true\n  broker: "manual"\n  manual:\n    account_file: "state/pea.json"',
+        )
+    )
+    config = load_config(config_path)
+
+    assert config.live.broker == "manual"
+    assert config.live.manual.account_file == "state/pea.json"
+
+
+def test_shipped_pea_example_config_loads():
+    config = load_config(REPO_ROOT / "config" / "config_pea_fortuneo.example.yaml")
+
+    assert config.live.broker == "manual"
+    assert config.market.calendar == "XPAR"

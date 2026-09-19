@@ -152,10 +152,30 @@ class BacktestConfig:
 
 
 @dataclass
+class ManualBrokerConfig:
+    """Paramètres du broker "manuel" (voir `trading_bot.execution.
+    manual_broker.ManualBroker`), utilisé quand aucune API de courtage n'est
+    disponible (ex: PEA Fortuneo) : le bot calcule les ordres mais ne les
+    envoie jamais lui-même, il affiche l'instruction exacte à exécuter à la
+    main et tient sa comptabilité (cash, positions) dans `account_file`,
+    que l'utilisateur initialise avec le solde/les positions réels de son
+    compte avant le premier cycle."""
+
+    account_file: str = "state/manual_account.json"
+
+
+@dataclass
 class LiveConfig:
     loop_interval_seconds: int
     trade_only_when_market_open: bool
     state_file: str = "state/live_state.json"
+    # "alpaca" (défaut, inchangé) : ordres envoyés automatiquement via l'API
+    # Alpaca. "manual" : aucune API de courtage (ex: PEA Fortuneo), le bot
+    # affiche chaque ordre/stop à exécuter à la main sur le site du courtier
+    # et utilise yfinance (pas Alpaca) comme source de données, voir
+    # `trading_bot.execution.manual_broker` et `ManualBrokerConfig`.
+    broker: str = "alpaca"
+    manual: ManualBrokerConfig = field(default_factory=ManualBrokerConfig)
     # Base persistante de performance réelle par symbole (voir
     # `trading_bot.portfolio.symbol_track_record`), utilisée par une
     # stratégie dont `universe_rotation.metric == "track_record"`. Partagée
@@ -243,6 +263,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     news_sentiment_raw = raw.get("news_sentiment", None) or {}
     optimization_raw = raw.get("optimization", None) or {}
 
+    live_raw = dict(raw["live"])
+    manual_raw = live_raw.pop("manual", None) or {}
+
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
         timeframe=raw["universe"].get("timeframe", "1Day"),
@@ -254,7 +277,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             volatility_filter=VolatilityFilterConfig(**volatility_raw),
         ),
         backtest=BacktestConfig(**raw["backtest"]),
-        live=LiveConfig(**raw["live"]),
+        live=LiveConfig(**live_raw, manual=ManualBrokerConfig(**manual_raw)),
         news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
         optimization=OptimizationConfig(**optimization_raw),
     )

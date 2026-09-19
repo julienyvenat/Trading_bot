@@ -100,3 +100,16 @@ def fetch_historical_data(
         data[symbol] = raw[["open", "high", "low", "close", "volume"]].sort_index()
 
     return data
+
+
+def fetch_latest_data(symbols: list[str], interval: str = "1d", lookback_days: int = 400) -> dict[str, pd.DataFrame]:
+    """Équivalent yfinance de `trading_bot.data.market_data.fetch_latest_bars`
+    (Alpaca) : une fenêtre glissante de `lookback_days` jusqu'à aujourd'hui,
+    plutôt qu'une plage de dates explicite comme `fetch_historical_data`.
+    Utilisé par le moteur live (`trading_bot.live.engine`) quand
+    `live.broker: "manual"` (ex: PEA sans API de courtage, voir
+    `trading_bot.execution.manual_broker`) — Alpaca ne couvrant pas les
+    actions européennes (Euronext...), le live doit alors s'appuyer sur
+    yfinance plutôt que sur `market_data.fetch_latest_bars`."""
+    start_date = (pd.Timestamp.now() - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    return fetch_historical_data(symbols, start_date=start_date, end_date=None, interval=interval)

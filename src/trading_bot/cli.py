@@ -305,8 +305,7 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
 
 def cmd_paper(args: argparse.Namespace) -> None:
-    from trading_bot.execution.alpaca_broker import AlpacaBroker
-    from trading_bot.live.engine import run_forever, run_once
+    from trading_bot.live.engine import build_broker, run_forever, run_once
     from trading_bot.state import load_state, save_state
 
     logger = setup_logging()
@@ -325,9 +324,7 @@ def cmd_paper(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     if args.once:
-        from trading_bot.config import load_alpaca_credentials
-
-        broker = AlpacaBroker(load_alpaca_credentials())
+        broker = build_broker(config)
         state = load_state(config.live.state_file)
         try:
             state = run_once(config, broker, dry_run=args.dry_run, state=state)
@@ -427,7 +424,9 @@ def build_parser() -> argparse.ArgumentParser:
     optimize_parser.set_defaults(func=cmd_optimize)
 
     paper_parser = subparsers.add_parser(
-        "paper", help="Lance le trading en paper trading (ou réel) via Alpaca.", parents=[config_parser]
+        "paper",
+        help="Lance le trading live (broker choisi via config.yaml -> live.broker : Alpaca ou manuel).",
+        parents=[config_parser],
     )
     paper_parser.add_argument("--once", action="store_true", help="N'exécute qu'un seul cycle puis s'arrête.")
     paper_parser.add_argument(

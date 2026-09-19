@@ -43,10 +43,9 @@ import time
 
 import pandas as pd
 
-from trading_bot.config import AlpacaCredentials, AppConfig, load_alpaca_credentials
+from trading_bot.config import AppConfig, load_alpaca_credentials
 from trading_bot.data.market_data import fetch_latest_bars
 from trading_bot.data.news_sentiment import fetch_recent_sentiment
-from trading_bot.execution.alpaca_broker import AlpacaBroker
 from trading_bot.execution.broker_base import Broker
 from trading_bot.execution.rebalancer import execute_orders, plan_orders
 from trading_bot.indicators import atr
@@ -147,11 +146,39 @@ def _submit_stop_order(
     )
 
 
+def _fetch_live_bars(config: AppConfig, symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Récupère les dernières bougies OHLCV pour un cycle live, via Alpaca ou
+    yfinance selon `config.live.broker` : Alpaca ne couvrant pas les actions
+    européennes, un broker "manual" (ex: PEA sans API, voir
+    `trading_bot.execution.manual_broker`) doit s'appuyer sur yfinance."""
+    if config.live.broker == "manual":
+        from trading_bot.data.historical import fetch_latest_data, yfinance_interval_for_timeframe
+
+        return fetch_latest_data(symbols, yfinance_interval_for_timeframe(config.timeframe))
+
+    return fetch_latest_bars(symbols, config.timeframe, load_alpaca_credentials())
+
+
+def build_broker(config: AppConfig) -> Broker:
+    """Instancie le broker configuré par `config.live.broker` : "alpaca"
+    (défaut, inchangé) ou "manual" (voir `trading_bot.execution.manual_broker`,
+    pour un compte sans API de courtage comme un PEA)."""
+    if config.live.broker == "manual":
+        from trading_bot.execution.manual_broker import ManualBroker
+
+        return ManualBroker(config.live.manual.account_file, calendar_name=config.market.calendar)
+    if config.live.broker != "alpaca":
+        raise ValueError(f"`live.broker` inconnu '{config.live.broker}'. Valeurs supportées : 'alpaca', 'manual'.")
+
+    from trading_bot.execution.alpaca_broker import AlpacaBroker
+
+    return AlpacaBroker(load_alpaca_credentials())
+
+
 def _fetch_filter_reference(
     symbol: str,
     data_by_symbol: dict[str, pd.DataFrame],
     config: AppConfig,
-    credentials: AlpacaCredentials,
 ) -> pd.DataFrame | None:
     """Renvoie les bougies d'un symbole de référence utilisé par un filtre
     (régime ou volatilité), en le récupérant séparément s'il n'est pas déjà
@@ -159,7 +186,7 @@ def _fetch_filter_reference(
     besoin d'y figurer, voir `RegimeFilterConfig`/`VolatilityFilterConfig`."""
     if symbol in data_by_symbol:
         return data_by_symbol[symbol]
-    extra = fetch_latest_bars([symbol], config.timeframe, credentials)
+    extra = _fetch_live_bars(config, [symbol])
     return extra.get(symbol)
 
 
@@ -176,10 +203,8 @@ def _close_all_positions(current_qty: dict[str, float], broker: Broker, dry_run:
 def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState) -> LiveState:
     """Exécute un cycle complet : données -> coupe-circuits -> signaux ->
     allocation -> risque -> ordres -> stops natifs. Renvoie l'état mis à jour."""
-    credentials = load_alpaca_credentials()
-
     logger.info("Récupération des données de marché pour %s...", ", ".join(config.symbols))
-    data_by_symbol = fetch_latest_bars(config.symbols, config.timeframe, credentials)
+    data_by_symbol = _fetch_live_bars(config, config.symbols)
     if not data_by_symbol:
         logger.warning("Aucune donnée de marché reçue, cycle ignoré.")
         return state
@@ -266,7 +291,7 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
 
     regime_config = config.market.regime_filter
     if regime_config.enabled:
-        bench_df = _fetch_filter_reference(regime_config.symbol, data_by_symbol, config, credentials)
+        bench_df = _fetch_filter_reference(regime_config.symbol, data_by_symbol, config)
         if bench_df is None:
             logger.warning(
                 "Filtre de régime activé pour %s mais aucune donnée disponible pour ce symbole : "
@@ -293,7 +318,7 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     # direction du marché, voir `trading_bot.portfolio.volatility_filter`).
     volatility_config = config.market.volatility_filter
     if volatility_config.enabled:
-        vol_df = _fetch_filter_reference(volatility_config.symbol, data_by_symbol, config, credentials)
+        vol_df = _fetch_filter_reference(volatility_config.symbol, data_by_symbol, config)
         if vol_df is None:
             logger.warning(
                 "Filtre de volatilité activé pour %s mais aucune donnée disponible pour ce symbole : "
@@ -337,9 +362,16 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     # majoritairement négatives — ne s'applique jamais à une position déjà
     # ouverte (jamais de blocage d'une réduction de risque). Voir
     # `trading_bot.data.news_sentiment` pour la justification de l'approche
-    # (API officielle Alpaca, pas de scraping).
+    # (API officielle Alpaca, pas de scraping) : indisponible en mode
+    # `live.broker: "manual"` (pas d'identifiants Alpaca dans ce mode).
     news_config = config.news_sentiment
-    if news_config.enabled:
+    if news_config.enabled and config.live.broker == "manual":
+        logger.warning(
+            "Filtre de sentiment de news activé mais indisponible en mode `live.broker: manual` "
+            "(API News Alpaca uniquement) : filtre ignoré ce cycle."
+        )
+    elif news_config.enabled:
+        credentials = load_alpaca_credentials()
         for symbol in list(sizings):
             sizing = sizings[symbol]
             is_new_entry = current_qty.get(symbol, 0.0) == 0.0 and abs(sizing.target_weight) > 1e-9
@@ -442,8 +474,7 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
     """Boucle infinie : exécute un cycle à chaque instant actionnable (marché
     ouvert, hors buffer de clôture), et dort intelligemment le reste du temps.
     """
-    credentials = load_alpaca_credentials()
-    broker = AlpacaBroker(credentials)
+    broker = build_broker(config)
     calendar = MarketCalendar(config.market.calendar)
 
     state = load_state(config.live.state_file)
@@ -454,10 +485,18 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
             config.live.state_file,
         )
 
-    mode = "PAPER" if credentials.paper else "RÉEL"
-    logger.info("Démarrage du moteur live en mode %s (dry_run=%s).", mode, dry_run)
-    if not credentials.paper and not dry_run:
-        logger.warning("!!! Compte RÉEL détecté : des ordres avec de l'argent réel vont être passés !!!")
+    if config.live.broker == "manual":
+        logger.info(
+            "Démarrage du moteur live en mode MANUEL (dry_run=%s) : chaque ordre/stop sera affiché à "
+            "exécuter toi-même sur ton courtier, jamais envoyé automatiquement.",
+            dry_run,
+        )
+    else:
+        credentials = load_alpaca_credentials()
+        mode = "PAPER" if credentials.paper else "RÉEL"
+        logger.info("Démarrage du moteur live en mode %s (dry_run=%s).", mode, dry_run)
+        if not credentials.paper and not dry_run:
+            logger.warning("!!! Compte RÉEL détecté : des ordres avec de l'argent réel vont être passés !!!")
 
     while True:
         try:

@@ -326,6 +326,33 @@ en paper trading).
 ⚠️ Pour trader en argent réel, passe `ALPACA_PAPER=false` dans `.env` **après**
 avoir validé ta stratégie en paper trading pendant une durée significative.
 
+### Mode manuel (PEA, ou tout courtier sans API — ex: Fortuneo)
+
+Fortuneo, comme la quasi-totalité des courtiers PEA en France, n'expose aucune
+API de passage d'ordres : le bot ne peut donc pas y trader automatiquement.
+`live.broker: "manual"` (voir `config/config_pea_fortuneo.example.yaml` et
+`trading_bot.execution.manual_broker`) permet quand même de l'utiliser en
+semi-automatique : le bot calcule les ordres et les stops suiveurs comme
+d'habitude, mais se contente de les **afficher** à exécuter toi-même sur le
+site du courtier — jamais envoyés automatiquement. Dans ce mode, les cours
+viennent de yfinance (Alpaca ne couvre pas les actions européennes), donc
+aucune clé API n'est nécessaire.
+
+```bash
+# Avant le premier cycle : crée le fichier de compte avec le solde de cash
+# et les positions réelles de ton PEA (voir live.manual.account_file dans la
+# config), ex :
+echo '{"cash": 5000.0, "positions": {}}' > state/manual_account_fortuneo.json
+
+python -m trading_bot paper --config config/config_pea_fortuneo.example.yaml --once
+```
+
+Après chaque ordre affiché, le bot met à jour `account_file` en supposant
+qu'il a été exécuté au prix affiché — corrige ce fichier à la main si le fill
+réel diffère (prix, ou ordre pas encore passé) avant le prochain cycle.
+Contrairement à Alpaca, les quantités sont arrondies à l'action entière (pas
+de fractionnaire sur un PEA).
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
@@ -385,6 +412,7 @@ src/trading_bot/
   execution/
     broker_base.py          # interface abstraite de broker
     alpaca_broker.py          # implémentation Alpaca
+    manual_broker.py           # implémentation "manuelle" (PEA sans API, ex: Fortuneo)
     rebalancer.py              # calcule et envoie les ordres nécessaires
   backtest/
     engine.py                   # boucle de backtest jour par jour

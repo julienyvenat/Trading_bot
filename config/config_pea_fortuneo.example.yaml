@@ -1,0 +1,103 @@
+# Variante PEA (ex: Fortuneo, ou tout courtier PEA sans API de trading).
+#
+# Fortuneo (comme la quasi-totalité des courtiers PEA en France) n'expose
+# aucune API de passage d'ordres : le bot ne peut donc PAS trader
+# automatiquement dessus. Cette config utilise `live.broker: "manual"` (voir
+# `trading_bot.execution.manual_broker`) : à chaque cycle, le bot calcule les
+# ordres et stops comme d'habitude, mais se contente de les AFFICHER à
+# exécuter toi-même sur le site de Fortuneo — jamais envoyés automatiquement.
+#
+# AVANT DE DÉMARRER, crée le fichier `live.manual.account_file` ci-dessous
+# avec le solde de cash et les positions réelles de ton PEA, par exemple :
+#   {"cash": 5000.0, "positions": {}}
+# ou, avec des positions déjà ouvertes :
+#   {"cash": 1200.0, "positions": {"MC.PA": {"qty": 3, "avg_entry_price": 780.0}}}
+# Le bot met ensuite ce fichier à jour lui-même après chaque ordre affiché
+# (en supposant qu'il a bien été exécuté au prix affiché) : corrige-le à la
+# main si le fill réel diffère.
+#
+# Comme il n'y a pas d'API de courtage, les cours viennent de yfinance (léger
+# délai possible, suffisant pour un usage à la séance, pas pour du scalping
+# serré) — aucune clé API n'est nécessaire pour ce mode, contrairement à
+# config.yaml (Alpaca).
+
+universe:
+  # Grandes capitalisations du CAC 40 (Euronext Paris), toutes éligibles au
+  # PEA (sièges sociaux dans l'UE/EEE). Tickers au format yfinance (suffixe
+  # ".PA"). Adapte librement à ton propre univers PEA — attention à ne garder
+  # que des titres/ETF réellement éligibles PEA (pas d'ETF répliquant un
+  # indice hors UE sans le montage "PEA-compatible" adéquat).
+  symbols:
+    - MC.PA # LVMH
+    - OR.PA # L'Oréal
+    - AI.PA # Air Liquide
+    - SU.PA # Schneider Electric
+    - SAN.PA # Sanofi
+    - TTE.PA # TotalEnergies
+    - BNP.PA # BNP Paribas
+    - AIR.PA # Airbus
+
+  timeframe: "1Day"
+
+strategies:
+  - name: sma_crossover
+    enabled: true
+    weight: 1.0
+    params:
+      fast_window: 20
+      slow_window: 50
+
+  - name: rsi_mean_reversion
+    enabled: true
+    weight: 1.0
+    params:
+      rsi_window: 14
+      oversold: 30
+      overbought: 70
+      trend_filter_window: 200
+
+  - name: momentum_breakout
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 55
+      exit_window: 20
+
+risk:
+  allow_short: false # obligatoire sur un PEA : la vente à découvert n'y est pas possible
+  max_gross_exposure_pct: 0.90
+  max_position_weight_pct: 0.25
+  risk_per_trade_pct: 0.01
+  atr_stop_multiple: 2.5
+  atr_window: 14
+  max_open_positions: 6
+  max_daily_loss_pct: 0.03
+  max_drawdown_pct: 0.20
+
+market:
+  # Calendrier Euronext Paris (jours fériés et horaires français), pas NYSE.
+  calendar: "XPAR"
+  close_buffer_minutes: 15
+
+backtest:
+  start_date: "2018-01-01"
+  end_date: null
+  initial_cash: 20000
+  commission_pct: 0.0015 # ~0.15 % par ordre chez Fortuneo : à ajuster à ton barème réel
+  # Seule source disponible pour des actions Euronext : Alpaca ne couvre que
+  # les marchés US.
+  data_source: "yfinance"
+
+live:
+  loop_interval_seconds: 3600
+  trade_only_when_market_open: true
+  state_file: "state/live_state_pea.json"
+  # "manual" : aucune API de courtage, chaque ordre/stop natif est affiché à
+  # exécuter à la main sur Fortuneo (voir trading_bot.execution.manual_broker).
+  broker: "manual"
+  manual:
+    account_file: "state/manual_account_fortuneo.json"
+
+optimization:
+  metric: sharpe_ratio
+  grids: {}
