@@ -1,8 +1,26 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
+
+from trading_bot.logger import setup_logging
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trading_bot_log(monkeypatch, tmp_path):
+    """Empêche tout test qui invoque une commande CLI (`cmd_paper`,
+    `cmd_backtest`, ...) — qui appelle `setup_logging()` sans argument — de
+    faire écrire le logger partagé `"trading_bot"` dans `logs/trading_bot.log`,
+    le fichier de PRODUCTION du bot live surveillé en continu (voir
+    `trading_bot.logger.setup_logging`) : ça polluerait ce log de fausses
+    lignes qui ressemblent à des coupe-circuits. On redirige le chemin par
+    défaut vers un fichier temporaire propre à chaque test plutôt que de
+    modifier chaque appelant individuellement."""
+    tmp_log = tmp_path / "trading_bot_test.log"
+    monkeypatch.setattr(setup_logging, "__defaults__", (logging.INFO, str(tmp_log)))
 
 
 def make_ohlcv(prices: np.ndarray, start: str = "2020-01-01") -> pd.DataFrame:
