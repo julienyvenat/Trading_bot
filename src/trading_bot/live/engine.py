@@ -56,7 +56,7 @@ from trading_bot.portfolio.allocator import SignalAllocator
 from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, apply_halt, should_flatten
 from trading_bot.portfolio.regime import latest_regime_scale
 from trading_bot.portfolio.risk import RiskManager
-from trading_bot.portfolio.stops import StopLevel, update_stop
+from trading_bot.portfolio.stops import StopLevel, is_triggered, update_stop
 from trading_bot.portfolio.symbol_track_record import load_track_record, merge_trades, save_track_record
 from trading_bot.portfolio.volatility_filter import latest_volatility_scale
 from trading_bot.state import LiveState, load_state, save_state
@@ -453,6 +453,37 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
         if qty == 0 and price and dry_run:
             qty = (target_weight * equity) / price
         if qty == 0:
+            continue
+
+        # Le marché a déjà franchi le niveau du stop ratcheté ENTRE deux
+        # cycles (ex: aucun stop natif resté posé chez le broker pendant
+        # cette fenêtre, suite à un rejet transitoire au cycle précédent) :
+        # soumettre un ordre stop natif à ce prix serait systématiquement
+        # rejeté par Alpaca ("stop price must be less than current price" /
+        # l'équivalent pour un short), la condition de déclenchement étant
+        # déjà vraie. Retenter `_submit_stop_order` en boucle ne ferait que
+        # répéter cet échec indéfiniment (voir bug XLE du 2026-09-21) en
+        # laissant la position sans AUCUNE protection. On flatten donc
+        # immédiatement au marché à la place, et on laisse
+        # `detect_realized_trades` constater la clôture au PROCHAIN cycle par
+        # comparaison avec `state.last_known_positions` (même pattern que le
+        # flatten de coupe-circuit plus haut).
+        if is_triggered(new_stop, low=price, high=price):
+            side = "sell" if direction > 0 else "buy"
+            logger.error(
+                "Stop suiveur sur %s déjà franchi (prix %.2f, stop %.2f) avant qu'un ordre stop natif "
+                "n'ait pu rester posé chez le broker : flatten immédiat au marché plutôt qu'une pose "
+                "vouée à l'échec.",
+                symbol,
+                price,
+                new_stop.stop_price,
+            )
+            _cancel_stop_order(symbol, state, broker, dry_run)
+            if dry_run:
+                logger.info("DRY-RUN FLATTEN (stop déjà franchi) %s %s %.4f", side.upper(), symbol, abs(qty))
+            else:
+                broker.submit_market_order(symbol, abs(qty), side)
+            state.trailing_stops.pop(symbol, None)
             continue
 
         stop_moved = previous_stop is None or previous_stop.stop_price != new_stop.stop_price
