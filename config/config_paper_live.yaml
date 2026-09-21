@@ -1,0 +1,274 @@
+# Variante de config.yaml dédiée au PAPER TRADING LIVE.
+# Différence unique avec config.yaml : `universe_rotation` désactivée sur
+# momentum_breakout (voir `trading_bot.cli.cmd_paper` : le moteur live refuse
+# de démarrer tant qu'une stratégie active a `universe_rotation.enabled`,
+# la rotation n'étant pour l'instant supportée qu'en backtest/optimize/
+# walk-forward). Le reste (symboles, poids, risque...) est identique à
+# config.yaml au moment de la création de ce fichier — à garder synchronisé
+# manuellement si tu changes l'un des deux plus tard.
+#
+# Modifie ce fichier pour changer les symboles suivis, les stratégies actives
+# et les paramètres de gestion du risque, sans toucher au code.
+
+universe:
+  # Actions / ETF suivis par le bot. GLD (or) est ici uniquement comme actif
+  # défensif pour `defensive_rotation` ci-dessous, mais reste comme tout autre
+  # symbole aussi soumis aux 3 stratégies actions (sma_crossover/
+  # rsi_mean_reversion/momentum_breakout peuvent aussi prendre position dessus
+  # selon SON PROPRE prix, en plus de la rotation défensive).
+  # Note : TLT (obligations) a été testé comme actif défensif mais écarté ---
+  # en 2022, actions ET obligations ont chuté ensemble (hausse des taux), donc
+  # la couverture obligataire a fait défaut pile quand on en avait besoin.
+  # L'or (GLD) s'est montré nettement plus robuste sur la période testée.
+  # Crypto (BTC/USD, ETH/USD) volontairement PAS ajouté ici : Alpaca les
+  # trade sous un format de symbole différent ("BTC/USD") avec un client de
+  # données distinct (crypto vs actions/ETF), et le marché crypto est ouvert
+  # 24/7 alors que tout le reste du bot (calendrier NYSE, coupe-circuit
+  # journalier, buffer de clôture) suppose des séances avec horaires fixes.
+  # Le brancher proprement demande d'adapter `market_calendar`,
+  # `data/market_data.py` et `execution/alpaca_broker.py`, pas seulement
+  # d'ajouter des symboles ici — à traiter comme un chantier à part.
+  symbols:
+    - SPY
+    - QQQ
+    - AAPL
+    - MSFT
+    - NVDA
+    - GLD
+    # ETF sectoriels ajoutés pour donner plus de matière à `relative_strength`
+    # (rotation cross-sectionnelle) : sans eux, le "top_n" de la rotation
+    # sectorielle n'avait à choisir qu'entre des symboles très corrélés
+    # tech (AAPL/MSFT/NVDA/QQQ), ce qui limitait la vraie diversification.
+    - XLK # Technologie
+    - XLE # Énergie
+    - XLF # Finance
+    - XLV # Santé
+
+  # Granularité des bougies utilisées par les stratégies
+  timeframe: "1Day"
+
+# Stratégies actives et leur poids relatif dans l'allocation de capital.
+# La somme des poids n'a pas besoin de faire 1 : ils sont normalisés automatiquement.
+strategies:
+  - name: sma_crossover
+    enabled: true
+    weight: 1.0
+    params:
+      fast_window: 20
+      slow_window: 50
+
+  - name: rsi_mean_reversion
+    enabled: true
+    weight: 1.0
+    params:
+      rsi_window: 14
+      oversold: 30
+      overbought: 70
+      # N'achète un creux de RSI que si le prix est au-dessus de sa SMA 200
+      # (marché haussier sur le fond) : évite d'acheter des creux en pleine
+      # tendance baissière ("couteau qui tombe"), là où le retour à la
+      # moyenne échoue le plus souvent. Mettre à null pour désactiver.
+      trend_filter_window: 200
+
+  - name: momentum_breakout
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 55
+      exit_window: 20
+    # Rotation périodique du sous-ensemble réellement tradé par CETTE
+    # stratégie (voir `UniverseRotationConfig` /
+    # `trading_bot.portfolio.universe_rotation`) : `metric: momentum`
+    # (fenêtre alignée sur `lookback_window` ci-dessus) est cohérent avec
+    # l'hypothèse de cette stratégie (une tendance qui se poursuit) — un
+    # titre sans tendance nette serait un mauvais candidat ici, même s'il
+    # bouge beaucoup (voir `metric: volatility`, pertinent pour une
+    # stratégie différente comme un retour à la moyenne). Pool de candidats
+    # volontairement plus large que `universe.symbols` ci-dessus (les mêmes
+    # titres, GLD compris pour ne rien retirer par rapport à avant, + quelques
+    # large caps/ETF liquides supplémentaires), pour laisser la rotation
+    # choisir au-delà du cœur d'univers fixe.
+    universe_rotation:
+      enabled: false # non supporté en live, voir l'en-tête de ce fichier
+      candidates:
+        - SPY
+        - QQQ
+        - AAPL
+        - MSFT
+        - NVDA
+        - GLD
+        - XLK
+        - XLE
+        - XLF
+        - XLV
+        - AMZN
+        - GOOGL
+        - META
+        - XLY
+        - XLI
+      metric: momentum
+      min_confidence: 0.6
+      stability_window: 2 # 2 réévaluations mensuelles : une tendance récente doit se confirmer, pas juste apparaître une fois
+      lookback_window: 55 # aligné sur `params.lookback_window` ci-dessus : même horizon de tendance
+      rebalance_every: 21 # ~1 mois de bougies journalières
+
+  # Rotation sectorielle / force relative : cross-sectionnelle (compare les
+  # symboles entre eux plutôt que de juger chacun dans l'absolu), pour une
+  # vraie diversification de mécanisme par rapport aux 3 stratégies ci-dessus.
+  - name: relative_strength
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 90
+      top_n: 2
+
+  # Rotation défensive : passe sur l'actif défensif (`defensive_symbol`)
+  # quand `benchmark_symbol` est en tendance baissière. Diversification de
+  # classe d'actif plutôt que de mécanisme de signal. Poids volontairement
+  # réduit (0.3 plutôt que 1.0 comme les autres) : c'est une assurance
+  # d'appoint, pas une source de rendement principal — à poids égal avec les
+  # autres, elle diluait trop le reste du portefeuille (testé et écarté).
+  - name: defensive_rotation
+    enabled: true
+    weight: 0.3
+    params:
+      defensive_symbol: "GLD"
+      benchmark_symbol: "SPY"
+      sma_window: 200
+
+# Gestion du risque et du portefeuille
+risk:
+  # Autoriser les positions courtes (short). false = long-only, recommandé pour débuter.
+  allow_short: false
+  # Capital max engagé au total (en % de l'equity du compte)
+  max_gross_exposure_pct: 0.90
+  # Poids max d'une seule position (en % de l'equity)
+  max_position_weight_pct: 0.25
+  # Risque max par trade (en % de l'equity), utilisé pour dimensionner via l'ATR
+  risk_per_trade_pct: 0.01
+  # Multiple d'ATR utilisé comme distance de stop-loss
+  atr_stop_multiple: 2.5
+  atr_window: 14
+  # Nombre max de positions simultanées, toutes stratégies confondues
+  max_open_positions: 8
+
+  # --- Coupe-circuits (kill switches) ---
+  # Perte journalière max (% de l'equity en début de séance) avant de bloquer
+  # toute NOUVELLE entrée pour le reste de la séance. Les positions déjà
+  # ouvertes restent gérées normalement (stop suiveur toujours actif).
+  # Se réinitialise automatiquement au début de chaque nouvelle séance.
+  max_daily_loss_pct: 0.03
+  # Drawdown max depuis le plus haut historique de l'equity avant de tout
+  # liquider et d'arrêter complètement le trading (nouvelles entrées ET
+  # positions existantes). Contrairement au coupe-circuit journalier, celui-ci
+  # NE SE RÉINITIALISE PAS automatiquement : une fois déclenché, il faut
+  # intervenir manuellement (voir README) avant que le bot ne retrade.
+  max_drawdown_pct: 0.20
+
+# Paramètres du calendrier de marché
+market:
+  # Calendrier boursier utilisé (jours fériés, horaires, fermetures anticipées).
+  # Voir https://github.com/rsheftel/pandas_market_calendars pour la liste des
+  # calendriers disponibles (NYSE couvre la quasi-totalité des actions/ETF US).
+  calendar: "NYSE"
+  # Ne pas ouvrir de NOUVELLE position dans les N dernières minutes avant la
+  # clôture (évite l'auction de clôture et le slippage de fin de séance).
+  # Les stops et sorties de positions existantes restent autorisés.
+  close_buffer_minutes: 15
+
+  # Filtre de régime de marché : réduit l'exposition du portefeuille quand
+  # `symbol` clôture sous sa moyenne mobile `sma_window` (régime baissier).
+  # Le bot est long-only et sans ce filtre rien ne réduit l'exposition en
+  # marché baissier généralisé (constaté sur le backtest 2022 : -16%,
+  # Sharpe -1.71). `symbol` n'a pas besoin d'être dans `universe.symbols` :
+  # il est utilisé uniquement comme référence, jamais tradé pour lui-même
+  # via ce mécanisme (il ne sera tradé que s'il figure aussi dans symbols).
+  regime_filter:
+    enabled: true
+    symbol: "SPY"
+    sma_window: 200
+    # Facteur appliqué aux expositions cibles en régime baissier.
+    # 0.0 = flatten total, 1.0 = filtre désactivé.
+    bearish_exposure_scale: 0.3
+    # Symboles jamais réduits par ce filtre. GLD est l'actif défensif de
+    # `defensive_rotation` : son exposition doit au contraire AUGMENTER en
+    # régime baissier, donc on l'exempte de la réduction globale ci-dessus.
+    exempt_symbols:
+      - GLD
+
+  # Filtre de volatilité : réduit l'exposition quand VIXY (ETF négociable qui
+  # réplique des futures VIX court terme, utilisé comme proxy puisqu'Alpaca
+  # ne fournit pas de données pour l'indice ^VIX lui-même) s'envole au-dessus
+  # de sa moyenne mobile récente, signe d'un pic de stress de marché.
+  # Complémentaire au `regime_filter` ci-dessus : celui-là réagit à la
+  # DIRECTION du marché (tendance longue), celui-ci à l'AMPLITUDE des
+  # mouvements récents (un choc peut survenir même en tendance haussière).
+  # `symbol` n'a pas besoin d'être dans `universe.symbols` : comme pour
+  # `regime_filter.symbol`, il sert uniquement de référence, jamais tradé
+  # pour lui-même via ce mécanisme.
+  volatility_filter:
+    enabled: false # désactivé par défaut : à valider en backtest avant activation live
+    symbol: "VIXY"
+    sma_window: 20
+    # Se déclenche quand VIXY dépasse sa SMA de plus de ce pourcentage.
+    spike_threshold_pct: 0.15
+    # Facteur appliqué aux expositions cibles pendant un pic de volatilité.
+    spike_exposure_scale: 0.5
+    exempt_symbols:
+      - GLD
+
+# Paramètres du backtest
+backtest:
+  start_date: "2018-01-01"
+  end_date: null # null = aujourd'hui
+  initial_cash: 100000
+  commission_pct: 0.0005 # 5 bps par trade, approximation de frais + slippage
+
+# Paramètres du moteur live (paper trading)
+live:
+  # Intervalle entre deux cycles de décision (en secondes). 3600 = toutes les heures.
+  loop_interval_seconds: 3600
+  # Ne trader que lorsque le marché US est ouvert, d'après le calendrier
+  # (voir market: ci-dessus). Si false, ignore complètement les horaires de
+  # marché (utile pour tester en dehors des heures de bourse).
+  trade_only_when_market_open: true
+  # Fichier utilisé pour persister l'état du bot entre deux redémarrages
+  # (stops suiveurs en cours, état des coupe-circuits). Important : si le
+  # coupe-circuit de drawdown a été déclenché, cet état est conservé même
+  # après un redémarrage, par sécurité.
+  state_file: "state/live_state.json"
+
+# Filtre de sentiment de news (voir trading_bot.data.news_sentiment) : bloque
+# les NOUVELLES entrées sur un symbole dont les news récentes (API News
+# officielle Alpaca, pas de scraping de forums/réseaux sociaux) sont
+# majoritairement négatives. Ne s'applique qu'en trading live pour l'instant
+# (aucune donnée de news historique alignée n'est encore branchée au
+# backtest, voir la docstring du module).
+news_sentiment:
+  enabled: false # désactivé par défaut : à activer une fois validé manuellement sur quelques cycles en dry-run
+  lookback_hours: 48
+  # Score dans [-1, 1] ; bloque l'entrée si le score calculé est en dessous.
+  block_threshold: -0.3
+  # N'applique le filtre que s'il y a au moins ce nombre d'articles récents
+  # (évite de bloquer une entrée sur la base d'un seul titre isolé).
+  min_articles: 2
+
+# Grilles de paramètres pour la recherche par grille (voir
+# trading_bot.backtest.optimizer), utilisées par `python -m trading_bot
+# optimize` et par `walk-forward --optimize`. Vide par défaut : aucun effet
+# tant qu'au moins une grille n'est pas renseignée ci-dessous. Une stratégie
+# absente de `grids` garde ses paramètres fixes définis dans `strategies:`
+# plus haut (elle n'est simplement pas grillée).
+optimization:
+  # Attribut de BacktestMetrics à maximiser (ex: sharpe_ratio, calmar_ratio,
+  # total_return_pct, profit_factor...).
+  metric: sharpe_ratio
+  grids: {}
+  # Exemple (à décommenter et adapter) :
+  # grids:
+  #   sma_crossover:
+  #     fast_window: [10, 20, 30]
+  #     slow_window: [50, 100, 150]
+  #   rsi_mean_reversion:
+  #     oversold: [20, 25, 30]
+  #     overbought: [70, 75, 80]

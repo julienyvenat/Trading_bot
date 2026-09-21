@@ -17,6 +17,7 @@ from trading_bot.config import (
 from trading_bot.execution.broker_base import AccountInfo, Broker, Position
 from trading_bot.live import engine as engine_module
 from trading_bot.state import LiveState
+from trading_bot.strategies.base import Strategy
 
 
 class FakeBroker(Broker):
@@ -289,6 +290,158 @@ def test_run_once_survives_rebalance_order_rejection_on_one_symbol(monkeypatch, 
     # (donc pas de position ouverte ni de stop pour lui).
     assert "UP" not in broker.positions
     assert "UP" not in state.stop_order_ids
+
+
+def test_run_once_flattens_position_when_stop_already_breached_instead_of_retrying(monkeypatch, uptrend_bars):
+    """Régression bug XLE (2026-09-21) : le marché a déjà franchi le niveau du
+    stop ratcheté ENTRE deux cycles (aucun stop natif n'est resté posé chez le
+    broker pendant cette fenêtre). Soumettre un ordre stop natif à ce prix est
+    systématiquement rejeté par Alpaca ("stop price must be less than current
+    price") puisque la condition de déclenchement est déjà vraie -> avant le
+    fix, `_submit_stop_order` retentait 3x la MÊME requête vouée à l'échec, à
+    chaque cycle, indéfiniment, en laissant la position totalement sans
+    protection. Le comportement attendu est un flatten immédiat au marché,
+    sans jamais tenter de poser de stop natif pour ce symbole ce cycle-ci."""
+    from trading_bot.portfolio.stops import StopLevel
+
+    config = make_config()
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+
+    qty = 100.0
+    current_price = float(uptrend_bars["close"].iloc[-1])
+    # Stop ratcheté au-dessus du prix courant : la position long est déjà
+    # "sous l'eau" par rapport à son stop (is_triggered serait True).
+    breached_stop = StopLevel(direction=1, stop_price=current_price + 5.0)
+
+    broker = FakeBroker(
+        equity=100_000.0,
+        positions={"UP": Position(symbol="UP", qty=qty, market_value=qty * current_price, avg_entry_price=current_price)},
+        prices={"UP": current_price},
+    )
+    broker.stop_orders["stop-existing"] = {
+        "symbol": "UP",
+        "qty": qty,
+        "side": "sell",
+        "stop_price": breached_stop.stop_price,
+    }
+
+    stop_order_attempts: list[tuple] = []
+
+    def _record_attempt(symbol, qty, side, stop_price):
+        stop_order_attempts.append((symbol, qty, side, stop_price))
+        raise RuntimeError('{"code":42210000,"message":"stop price must be less than current price"}')
+
+    broker.submit_stop_order = _record_attempt
+
+    state = LiveState(
+        trailing_stops={"UP": breached_stop},
+        stop_order_ids={"UP": "stop-existing"},
+        stop_order_dates={"UP": pd.Timestamp.now(tz="UTC").date().isoformat()},
+    )
+
+    new_state = engine_module.run_once(config, broker, dry_run=False, state=state)
+
+    # Aucune tentative de pose de stop natif pour ce symbole (pas de boucle de
+    # retry sur une requête qui serait de toute façon rejetée par Alpaca).
+    assert stop_order_attempts == []
+    # Le stop existant (désormais inutile) a été annulé...
+    assert "stop-existing" in broker.cancelled_order_ids
+    # ...et la position (éventuellement rééquilibrée ce même cycle) a bien
+    # été flattenée directement au marché, plutôt que laissée avec un stop
+    # mort-né.
+    assert broker.submitted_orders[-1][0] == "UP"
+    assert broker.submitted_orders[-1][2] == "sell"
+    assert "UP" not in broker.positions
+    assert "UP" not in new_state.trailing_stops
+    assert "UP" not in new_state.stop_order_ids
+
+
+class _AlwaysShortStrategy(Strategy):
+    """Stratégie factice : toujours pleinement short sur tout symbole reçu.
+
+    Aucune des stratégies livrées avec le projet (sma_crossover,
+    rsi_mean_reversion, etc., voir leurs `generate_signals`) n'émet jamais de
+    signal négatif : le short n'est donc atteignable, même avec
+    `config.risk.allow_short=True`, qu'avec une stratégie qui le fait
+    réellement (voir aussi `test_allocator.test_combine_signals_clips_negative_when_no_short`,
+    qui vérifie la même mécanique au niveau de `combine_signals`). Cette
+    stratégie factice sert uniquement à exercer le chemin court de
+    `run_once`, `allow_short` étant un mécanisme réel de
+    `SignalAllocator`/`RiskManager`, pas du code mort."""
+
+    name = "always_short"
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        return pd.Series(-1.0, index=df.index)
+
+
+def test_run_once_flattens_short_position_when_stop_already_breached_instead_of_retrying(monkeypatch, uptrend_bars):
+    """Variante short de
+    `test_run_once_flattens_position_when_stop_already_breached_instead_of_retrying` :
+    même bug XLE, côté position courte. Le stop suiveur d'une position courte
+    a `direction=-1` (voir `update_stop`/`StopLevel`) et un flatten doit donc
+    racheter au marché (`side="buy"`) plutôt que vendre, contrairement au cas
+    long. `config.risk.allow_short=True` est nécessaire pour que
+    `SignalAllocator` autorise une exposition cible négative (voir
+    `SignalAllocator.target_exposure_series`) ; comme aucune stratégie réelle
+    du projet ne shorte, `_AlwaysShortStrategy` ci-dessus force ce signal pour
+    exercer le chemin bout en bout."""
+    from trading_bot.portfolio.stops import StopLevel
+
+    config = make_config()
+    config.risk.allow_short = True
+    monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
+    monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
+    monkeypatch.setattr(engine_module, "build_enabled_strategies", lambda strategies: [(_AlwaysShortStrategy(), 1.0)])
+
+    qty = -100.0
+    current_price = float(uptrend_bars["close"].iloc[-1])
+    # Stop ratcheté en dessous du prix courant : la position courte est déjà
+    # "sous l'eau" par rapport à son stop (is_triggered serait True).
+    breached_stop = StopLevel(direction=-1, stop_price=current_price - 5.0)
+
+    broker = FakeBroker(
+        equity=100_000.0,
+        positions={"UP": Position(symbol="UP", qty=qty, market_value=qty * current_price, avg_entry_price=current_price)},
+        prices={"UP": current_price},
+    )
+    broker.stop_orders["stop-existing"] = {
+        "symbol": "UP",
+        "qty": abs(qty),
+        "side": "buy",
+        "stop_price": breached_stop.stop_price,
+    }
+
+    stop_order_attempts: list[tuple] = []
+
+    def _record_attempt(symbol, qty, side, stop_price):
+        stop_order_attempts.append((symbol, qty, side, stop_price))
+        raise RuntimeError('{"code":42210000,"message":"stop price must be less than current price"}')
+
+    broker.submit_stop_order = _record_attempt
+
+    state = LiveState(
+        trailing_stops={"UP": breached_stop},
+        stop_order_ids={"UP": "stop-existing"},
+        stop_order_dates={"UP": pd.Timestamp.now(tz="UTC").date().isoformat()},
+    )
+
+    new_state = engine_module.run_once(config, broker, dry_run=False, state=state)
+
+    # Aucune tentative de pose de stop natif pour ce symbole (pas de boucle de
+    # retry sur une requête qui serait de toute façon rejetée par Alpaca).
+    assert stop_order_attempts == []
+    # Le stop existant (désormais inutile) a été annulé...
+    assert "stop-existing" in broker.cancelled_order_ids
+    # ...et la position (éventuellement rééquilibrée ce même cycle) a bien
+    # été flattenée directement au marché (rachat), plutôt que laissée avec
+    # un stop mort-né.
+    assert broker.submitted_orders[-1][0] == "UP"
+    assert broker.submitted_orders[-1][2] == "buy"
+    assert "UP" not in broker.positions
+    assert "UP" not in new_state.trailing_stops
+    assert "UP" not in new_state.stop_order_ids
 
 
 def test_run_once_renews_stop_order_on_new_trading_day_even_if_price_unchanged(monkeypatch, uptrend_bars):
