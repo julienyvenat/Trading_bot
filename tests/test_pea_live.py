@@ -73,7 +73,11 @@ def test_native_trailing_stop_notified_once_then_silent_then_detected(env):
     assert texts[0][0] == "order"
     assert texts[0][1].startswith("ACHETER 38 ETF — ordre au marché (ou à cours limité 59,72 €)")
     assert "frais ≈ 4,52 €" in texts[0][1]
-    assert texts[1] == ("stop", "Poser un STOP SUIVEUR : vendre 38 ETF, écart 20,0 % (≈ 11,88 €), seuil de départ 47,54 €")
+    assert texts[1] == (
+        "stop",
+        "Une fois l'achat exécuté, poser un STOP SUIVEUR : vendre 38 ETF, écart 20,0 % (≈ 11,88 €), "
+        "seuil de départ 47,54 €",
+    )
     assert len(texts) == 2
     data = json.loads(account.read_text())
     assert data["positions"]["ETF"]["qty"] == 38
@@ -128,7 +132,8 @@ def test_stop_mode_none_says_no_stop(env):
     state = engine_module.run_once(config, broker, dry_run=False, state=LiveState())
     instructions = broker.drain_instructions()
     assert [i.kind for i in instructions] == ["order", "info"]
-    assert instructions[1].text.startswith("Pas de stop à poser sur ETF")
+    assert instructions[1].text.startswith("Pas de stop à poser sur ETF : risk.stop_mode vaut none dans cette config")
+    assert "PSP5" not in instructions[1].text  # neutre vis-à-vis de la config (pas de backtest cité)
     assert state.native_stops == {}
 
     # Cycle suivant sans changement : aucune notification.
@@ -158,6 +163,17 @@ def test_alerts_only_on_crossing(env):
     state = engine_module.run_once(config, broker, dry_run=False, state=state)
     infos = broker.drain_instructions()
     assert any("repassé au-dessus" in i.text for i in infos)
+
+
+def test_stop_for_existing_position_without_buy_this_cycle(env, tmp_path):
+    """Position déjà détenue au démarrage (aucun achat ce cycle) : simple
+    "Poser un STOP SUIVEUR", sans référence à un achat."""
+    config, account, holder, set_bars = env
+    account.write_text(json.dumps({"cash": 50.0, "positions": {"ETF": {"qty": 38, "avg_entry_price": 55.0}}}))
+    broker = _broker(config)
+    engine_module.run_once(config, broker, dry_run=False, state=LiveState())
+    texts = [i.text for i in broker.drain_instructions()]
+    assert texts == ["Poser un STOP SUIVEUR : vendre 38 ETF, écart 20,0 % (≈ 11,88 €), seuil de départ 47,54 €"]
 
 
 def test_trailing_pct_without_native_manual_broker_is_rejected(env):

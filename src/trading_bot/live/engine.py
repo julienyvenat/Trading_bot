@@ -521,6 +521,7 @@ def _place_native_stops(
     last_prices: dict[str, float],
     broker: Broker,
     dry_run: bool,
+    bought_this_cycle: set[str] | None = None,
 ) -> None:
     """Mode Stop Suiveur natif : invite à poser un stop une seule fois par
     position (écart figé en %), puis laisse le courtier le remonter. Rien à
@@ -544,7 +545,9 @@ def _place_native_stops(
         if dry_run:
             logger.info("DRY-RUN STOP SUIVEUR %s %.0f écart %.1f%% seuil %.2f", symbol, qty, trail_pct * 100, stop.stop_price)
             continue
-        broker.submit_trailing_stop_order(symbol, qty, trail_pct, stop.stop_price)
+        broker.submit_trailing_stop_order(
+            symbol, qty, trail_pct, stop.stop_price, after_buy=symbol in (bought_this_cycle or set())
+        )
         state.native_stops[symbol] = {
             "trail_pct": trail_pct,
             "high_water": stop.high_water,
@@ -766,6 +769,7 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     orders = plan_orders(sizings, current_qty, equity, last_prices)
     orders = apply_execution_rules(orders, current_qty, equity, last_prices, account.cash, rules)
     entered_this_cycle = {o.symbol for o in orders if o.side == "buy" and current_qty.get(o.symbol, 0.0) == 0.0}
+    bought_this_cycle = {o.symbol for o in orders if o.side == "buy"}
 
     # Annule le stop natif des symboles dont la position va changer AVANT
     # d'envoyer l'ordre de rebalancement : le broker réserve les actions
@@ -803,13 +807,14 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
             if current_qty.get(symbol, 0.0) > 0:
                 _note(
                     broker,
-                    f"Pas de stop à poser sur {symbol.split('.')[0]} (risk.stop_mode: none, choix de cette config — "
-                    "voir README : en backtest à frais réels, aucun stop suiveur large n'améliorait le "
-                    "couple rendement/drawdown du buy & hold PSP5)."
+                    f"Pas de stop à poser sur {symbol.split('.')[0]} : risk.stop_mode vaut none dans cette config "
+                    "(justification dans ses commentaires et dans le README)."
                     + (" Alertes d'information actives (SMA / drawdown)." if config.live.alerts.enabled else ""),
                 )
     elif native_stops:
-        _place_native_stops(config, state, sizings, current_qty, data_by_symbol, last_prices, broker, dry_run)
+        _place_native_stops(
+            config, state, sizings, current_qty, data_by_symbol, last_prices, broker, dry_run, bought_this_cycle
+        )
     else:
         _manage_replaced_stops(config, state, sizings, current_qty, data_by_symbol, last_prices, broker, dry_run, equity, today_str)
 

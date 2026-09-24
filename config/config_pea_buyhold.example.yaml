@@ -2,11 +2,14 @@
 #
 # Le plus simple et, sur 2018→2026, le plus rentable en backtest à frais
 # réels (voir README, section "PEA Fortuneo v2") : tout le cash est investi
-# en actions ENTIÈRES de PSP5, puis on ne touche plus à rien. Aucun stop par
-# défaut : en backtest, aucun stop suiveur large (ATR x4/6/8 ou 15/20/25 %)
-# ne bat le buy & hold pur en Sharpe, et le seul qui réduit le drawdown sur
-# toute la période (20 %) le doit au seul krach de 2020, coûte ~3 pts de
-# CAGR et fait moins bien hors échantillon. À la place, alertes d'INFORMATION (pas d'ordre)
+# en actions ENTIÈRES de PSP5, puis on ne touche plus à rien. Pas de stop
+# par défaut : sur 2018→2026, tous les stops suiveurs larges testés (ATR
+# x4/6/8, 15/20/25 %) perdent face au buy & hold pur en CAGR et en Sharpe.
+# Hors échantillon (2023→), ATR x8 et 15 % ont presque divisé le drawdown par
+# deux (-14 à -16 % contre -23 %) à Sharpe égal ou meilleur, pour 1,7 à
+# 2,3 pts de CAGR en moins. C'est une option légitime si tu privilégies le
+# drawdown (stop_mode: trailing_pct ci-dessous, voir le tableau du README).
+# À la place du stop : alertes d'INFORMATION (pas d'ordre)
 # si PSP5 clôture sous sa SMA 200 ou si le compte perd plus de 20 % depuis
 # son plus haut.
 #

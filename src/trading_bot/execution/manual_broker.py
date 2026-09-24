@@ -29,7 +29,7 @@ Format des instructions : pensé pour Fortuneo (mnémonique sans le suffixe
 yfinance ".PA", montants au format français), ex :
 
     ACHETER 38 PSP5 — ordre au marché (ou à cours limité 59,77 €) · ≈ 2 259,86 € au cours de 59,47 €, frais ≈ 4,52 €
-    Poser un STOP SUIVEUR : vendre 38 PSP5, écart 12,5 % (≈ 7,43 €), seuil de départ 52,04 €
+    Une fois l'achat exécuté, poser un STOP SUIVEUR : vendre 38 PSP5, écart 12,5 % (≈ 7,43 €), seuil de départ 52,04 €
 
 Les frais estimés (barème `backtest.commission_schedule`, voir
 `trading_bot.portfolio.fees`) sont aussi déduits du cash de `account_file`.
@@ -244,13 +244,18 @@ class ManualBroker(Broker):
         # continue de fonctionner (détection de stop "posé"/"à reposer").
         return f"manual-{symbol}-{int(time.time())}"
 
-    def submit_trailing_stop_order(self, symbol: str, qty: float, trail_pct: float, start_stop_price: float) -> None:
+    def submit_trailing_stop_order(
+        self, symbol: str, qty: float, trail_pct: float, start_stop_price: float, after_buy: bool = False
+    ) -> None:
         """Instruction de pose d'un ordre "Stop Suiveur" NATIF (vente) : le
         courtier remonte lui-même le seuil en continu, le bot ne redemandera
         donc jamais de le "remplacer" à chaque cycle (voir
-        `trading_bot.live.engine`, mode `live.manual.native_trailing_stop`)."""
+        `trading_bot.live.engine`, mode `live.manual.native_trailing_stop`).
+        `after_buy` : l'achat correspondant figure dans le même récapitulatif,
+        le stop ne peut être posé qu'une fois cet achat exécuté."""
         price = self.get_last_price(symbol)
-        instruction = "Poser un STOP SUIVEUR : vendre %d %s, écart %s (≈ %s), seuil de départ %s" % (
+        prefix = "Une fois l'achat exécuté, poser" if after_buy else "Poser"
+        instruction = prefix + " un STOP SUIVEUR : vendre %d %s, écart %s (≈ %s), seuil de départ %s" % (
             math.floor(qty),
             broker_ticker(symbol),
             fmt_pct(trail_pct),

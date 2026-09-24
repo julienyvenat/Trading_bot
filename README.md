@@ -418,25 +418,45 @@ Exécution à l'ouverture du lendemain du signal, comme le reste du backtest.
 **Résultats** (2018-01-01 → 2026-09-24, 2 306,59 € de départ, reproduire
 avec `python scripts/pea_compare.py`). (a) — choix du stop :
 
-| Variante | Total | CAGR | Max DD | Sharpe | Calmar | Ordres/an | Frais |
-|---|---|---|---|---|---|---|---|
-| **Buy & hold PSP5, sans stop** | +237,9 % | +14,7 % | -33,6 % | **0,91** | 0,44 | 0,1 | 4,59 € |
-| Stop suiveur ATR×4 (écart figé à l'entrée) | +106,6 % | +8,5 % | -26,1 % | 0,69 | 0,33 | 7,6 | 382 € |
-| Stop suiveur ATR×6 | +120,0 % | +9,3 % | -23,8 % | 0,71 | 0,39 | 2,8 | 158 € |
-| Stop suiveur ATR×8 | +131,3 % | +9,9 % | -25,2 % | 0,72 | 0,39 | 1,2 | 58 € |
-| Stop suiveur 15 % | +93,9 % | +7,8 % | -30,2 % | 0,59 | 0,26 | 1,5 | 69 € |
-| Stop suiveur 20 % | +170,8 % | +11,9 % | -21,3 % | 0,84 | 0,56 | 0,6 | 35 € |
-| Stop suiveur 25 % | +132,7 % | +10,0 % | -27,1 % | 0,71 | 0,37 | 0,6 | 31 € |
+Chaque cellule : CAGR / Max DD / Sharpe / Calmar. Frais et ordres/an sur la
+période complète.
 
-Stops modélisés comme un Stop Suiveur Fortuneo (seuil = plus haut depuis
-l'entrée × (1 - écart), exécuté au seuil ou à l'ouverture en cas de gap), avec
-ré-entrée seulement quand PSP5 repasse au-dessus de sa SMA200 (sinon on
-rachèterait le lendemain). Seul le stop 20 % améliore le Calmar sur toute la
-période, grâce au seul krach de mars 2020 — mais il coûte ~3 points de CAGR,
-son Sharpe reste inférieur, et hors échantillon (2023→) il est moins bon que
-le buy & hold sur tous les critères (CAGR 14,7 % vs 18,8 %, DD -20,8 % vs
--23,1 %, Sharpe 1,17 vs 1,33). **Défaut retenu : pas de stop**, alertes
-d'information uniquement.
+| Variante | 2018→2026 | En échantillon 2018-2022 | Hors échantillon 2023→ | Ordres/an | Frais |
+|---|---|---|---|---|---|
+| **Buy & hold PSP5, sans stop** | +14,7 % / -33,6 % / **0,91** / 0,44 | +11,3 % / -33,6 % / **0,67** / 0,34 | +18,8 % / -23,1 % / 1,33 / 0,81 | 0,1 | 4,59 € |
+| Stop suiveur ATR×4 (écart figé à l'entrée) | +8,5 % / -26,1 % / 0,69 / 0,33 | +3,8 % / -26,1 % / 0,33 / 0,15 | +16,2 % / -13,4 % / 1,41 / 1,21 | 7,6 | 382 € |
+| Stop suiveur ATR×6 | +9,3 % / -23,8 % / 0,71 / 0,39 | +5,4 % / -23,8 % / 0,43 / 0,23 | +14,0 % / -18,6 % / 1,13 / 0,76 | 2,8 | 158 € |
+| Stop suiveur ATR×8 | +9,9 % / -25,2 % / 0,72 / 0,39 | +5,8 % / -25,2 % / 0,43 / 0,23 | +17,1 % / -14,1 % / 1,42 / 1,21 | 1,2 | 58 € |
+| Stop suiveur 15 % | +7,8 % / -30,2 % / 0,59 / 0,26 | +2,6 % / -30,2 % / 0,24 / 0,09 | +16,5 % / -15,9 % / 1,33 / 1,04 | 1,5 | 69 € |
+| Stop suiveur 20 % | +11,9 % / -21,3 % / 0,84 / 0,56 | +9,5 % / -21,3 % / 0,64 / 0,44 | +14,7 % / -20,8 % / 1,17 / 0,71 | 0,6 | 35 € |
+| Stop suiveur 25 % | +10,0 % / -27,1 % / 0,71 / 0,37 | +7,8 % / -27,1 % / 0,54 / 0,29 | +12,4 % / -26,4 % / 0,97 / 0,47 | 0,6 | 31 € |
+
+Les stops sont modélisés comme un Stop Suiveur Fortuneo : seuil = plus haut
+depuis l'entrée × (1 - écart), exécuté au seuil, ou à l'ouverture en cas de
+gap. On ne rachète que lorsque PSP5 repasse au-dessus de sa SMA200 (sinon on
+rachèterait le lendemain).
+
+Lecture honnête :
+- **Sur toute la période et en échantillon**, tous les stops perdent face au
+  buy & hold en CAGR (-3 à -7 pts/an) et en Sharpe. Seul le stop 20 %
+  améliore le Calmar (0,56 contre 0,44), et il le doit au seul krach de
+  mars 2020.
+- **Hors échantillon (2023→)**, ATR×8 (DD -14,1 %, Sharpe 1,42) et 15 %
+  (DD -15,9 %, Sharpe 1,33) divisent presque par deux le drawdown du buy &
+  hold (-23,1 %), à Sharpe égal ou meilleur, pour un rendement annuel plus
+  faible de -1,7 et -2,3 pts. ATR×4 fait pareil (-13,4 %, 1,41), mais passe
+  7,6 ordres/an et paie 382 € de frais. Le stop 20 % réduit un peu le
+  drawdown (-20,8 %) mais perd 4 pts de CAGR, et son Sharpe est plus bas (1,17).
+- Même hors échantillon, tous les stops restent sous le buy & hold en CAGR.
+  Les classements s'inversent d'une sous-période à
+  l'autre, signe d'une forte dépendance à quelques épisodes.
+
+**Défaut retenu : pas de stop** (meilleur rendement et meilleur Sharpe sur
+la période complète), avec des alertes d'information uniquement. Un stop
+suiveur large reste un choix légitime si tu préfères limiter le drawdown :
+ATR×8 ou 15 % ont été les plus convaincants hors échantillon, au prix d'un
+rendement plus faible. Pour l'activer : `risk.stop_mode: trailing_pct`,
+avec `trailing_stop_pct: 0.15`, ou `null` avec `atr_stop_multiple: 8`.
 
 (b) — petite grille (lookback 6/12 mois × top 1/2), rien d'autre d'optimisé :
 
@@ -481,13 +501,13 @@ lendemain matin — même convention que le backtest). Exemple de premier push
 ```
 PEA buy & hold — 1 ordre(s) à passer
 ORDRE : ACHETER 38 PSP5 — ordre au marché (ou à cours limité 59,72 €) · ≈ 2 257,96 € au cours de 59,42 €, frais ≈ 4,52 €
-INFO : Pas de stop à poser sur PSP5 (risk.stop_mode: none, choix de cette config — voir README : …). Alertes d'information actives (SMA / drawdown).
+INFO : Pas de stop à poser sur PSP5 : risk.stop_mode vaut none dans cette config (justification dans ses commentaires et dans le README). Alertes d'information actives (SMA / drawdown).
 ```
 
 **Stop Suiveur natif** (`live.manual.native_trailing_stop: true` avec
 `risk.stop_mode: trailing_pct`) : l'écart est figé en % à l'entrée
 (`risk.trailing_stop_pct`, ou `atr_stop_multiple` × ATR / cours), le bot
-demande de poser l'ordre **une seule fois** — « Poser un STOP SUIVEUR : vendre
+demande de poser l'ordre **une seule fois** — « Une fois l'achat exécuté, poser un STOP SUIVEUR : vendre
 38 PSP5, écart 20,0 % (≈ 11,88 €), seuil de départ 47,54 € » — puis ne
 notifie plus rien tant que la position ne change pas (Fortuneo remonte le
 seuil lui-même). Il rejoue les plus hauts/bas yfinance pour détecter un
