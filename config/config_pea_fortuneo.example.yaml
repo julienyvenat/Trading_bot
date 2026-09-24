@@ -36,6 +36,11 @@ universe:
     - TTE.PA # TotalEnergies
     - BNP.PA # BNP Paribas
     - AIR.PA # Airbus
+    # Équivalent PEA de SPY (utilisé dans config.yaml) : ETF S&P 500 éligible
+    # PEA (réplication synthétique, domicilié en France), coté en euros sur
+    # Euronext Paris — même calendrier XPAR et même source yfinance que les
+    # actions ci-dessus. Sert aussi de référence au `regime_filter` plus bas.
+    - PSP5.PA # Amundi PEA S&P 500 UCITS ETF
 
   timeframe: "1Day"
 
@@ -78,6 +83,24 @@ market:
   # Calendrier Euronext Paris (jours fériés et horaires français), pas NYSE.
   calendar: "XPAR"
   close_buffer_minutes: 15
+
+  # Filtre de régime de marché (voir config.yaml pour le détail) : réduit
+  # l'exposition quand `symbol` clôture sous sa SMA `sma_window`. PSP5
+  # remplace ici SPY, non éligible PEA, comme référence S&P 500 (cotée en
+  # EUR, donc le signal inclut aussi l'effet change EUR/USD).
+  regime_filter:
+    enabled: true
+    symbol: "PSP5.PA"
+    sma_window: 200
+    bearish_exposure_scale: 0.3
+    # Vide : pas de GLD (ni de `defensive_rotation`) en mode PEA, aucun ETF
+    # or éligible PEA — donc aucun actif défensif à exempter de la réduction.
+    exempt_symbols: []
+
+  # Filtre de volatilité désactivé : son proxy VIXY (futures VIX) n'a aucun
+  # équivalent éligible PEA.
+  volatility_filter:
+    enabled: false
 
 backtest:
   start_date: "2018-01-01"

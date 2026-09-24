@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from trading_bot.config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -147,3 +149,43 @@ def test_shipped_pea_example_config_loads():
 
     assert config.live.broker == "manual"
     assert config.market.calendar == "XPAR"
+
+
+def test_pea_example_config_uses_psp5_and_excludes_us_only_symbols():
+    """Mode PEA : PSP5 (ETF S&P 500 éligible PEA) remplace SPY, et GLD/VIXY
+    (sans équivalent éligible PEA) sont totalement exclus — ni tradés, ni
+    utilisés comme référence par un filtre ou une stratégie."""
+    config = load_config(REPO_ROOT / "config" / "config_pea_fortuneo.example.yaml")
+
+    assert config.live.broker == "manual"
+    assert config.risk.allow_short is False
+
+    assert "PSP5.PA" in config.symbols
+    assert config.market.regime_filter.enabled is True
+    assert config.market.regime_filter.symbol == "PSP5.PA"
+    assert config.market.regime_filter.exempt_symbols == []
+    assert config.market.volatility_filter.enabled is False
+    assert all(s.name != "defensive_rotation" for s in config.strategies)
+
+    referenced = set(config.symbols) | set(config.market.regime_filter.exempt_symbols)
+    referenced.add(config.market.regime_filter.symbol)
+    for strategy in config.strategies:
+        referenced |= set(strategy.universe_rotation.candidates)
+        referenced |= {str(v) for v in strategy.params.values()}
+    forbidden = {"SPY", "GLD", "VIXY"}
+    assert not referenced & forbidden
+    # Filet de sécurité supplémentaire : aucune mention de ces tickers US dans
+    # les valeurs du YAML brut (hors commentaires), quel que soit l'endroit.
+    raw = yaml.safe_load((REPO_ROOT / "config" / "config_pea_fortuneo.example.yaml").read_text())
+
+    def _values(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                yield from _values(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from _values(v)
+        else:
+            yield node
+
+    assert not {str(v) for v in _values(raw)} & forbidden
