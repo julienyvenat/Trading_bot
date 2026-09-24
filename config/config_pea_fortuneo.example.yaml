@@ -120,6 +120,21 @@ live:
   broker: "manual"
   manual:
     account_file: "state/manual_account_fortuneo.json"
+  # Notifications push Pushover (https://pushover.net) : UN push par cycle
+  # récapitule les ordres/stops à passer à la main sur Fortuneo (aucun push
+  # si rien à faire), plus une alerte si un cycle crashe ou si un
+  # coupe-circuit se déclenche. Les identifiants ne sont JAMAIS dans ce
+  # fichier : renseigne-les dans `.env` (ou l'environnement du process) :
+  #   PUSHOVER_APP_TOKEN=...  # "API Token" de l'application créée sur pushover.net
+  #   PUSHOVER_USER_KEY=...   # "User Key" affichée sur ton tableau de bord Pushover
+  # Vérifie-les avec : python -m trading_bot notify-test --config <cette config>
+  # S'ils manquent, le bot tourne quand même (avertissement au démarrage).
+  notifications:
+    pushover:
+      enabled: true
+      title: "Trading Bot PEA"
+      priority: 0 # récapitulatif d'ordres (-2 à 2, voir doc Pushover)
+      alert_priority: 1 # crash / coupe-circuit : priorité haute (contourne les heures calmes)
 
 optimization:
   metric: sharpe_ratio
