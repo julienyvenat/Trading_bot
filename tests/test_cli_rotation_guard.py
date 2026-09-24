@@ -14,6 +14,7 @@ from trading_bot.config import (
     StrategyConfig,
     UniverseRotationConfig,
 )
+from trading_bot.state import LiveState
 
 _RISK = RiskConfig(
     allow_short=False,
@@ -71,7 +72,7 @@ def test_paper_proceeds_past_guard_when_rotation_disabled(monkeypatch):
     monkeypatch.setattr("trading_bot.live.engine.run_once", _fake_run_once)
     monkeypatch.setattr("trading_bot.config.load_alpaca_credentials", lambda: None)
     monkeypatch.setattr("trading_bot.execution.alpaca_broker.AlpacaBroker", lambda credentials: None)
-    monkeypatch.setattr("trading_bot.state.load_state", lambda path: object())
+    monkeypatch.setattr("trading_bot.state.load_state", lambda path: LiveState())
     monkeypatch.setattr("trading_bot.state.save_state", lambda path, state: None)
 
     with pytest.raises(RuntimeError) as excinfo:

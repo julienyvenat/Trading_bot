@@ -165,6 +165,33 @@ class ManualBrokerConfig:
 
 
 @dataclass
+class PushoverConfig:
+    """Notifications push via Pushover (https://pushover.net/api, voir
+    `trading_bot.notify.pushover`), surtout utiles en mode `live.broker:
+    "manual"` : un seul push par cycle récapitule les ordres/stops à passer
+    à la main sur le courtier, plus une alerte en cas de crash de cycle ou de
+    déclenchement d'un coupe-circuit.
+
+    Désactivé par défaut (rétrocompatible). Les identifiants ne sont JAMAIS
+    lus depuis le YAML : uniquement depuis les variables d'environnement
+    `PUSHOVER_APP_TOKEN` / `PUSHOVER_USER_KEY` (éventuellement via `.env`).
+    """
+
+    enabled: bool = False
+    # Priorité Pushover (-2 à 2) des récapitulatifs d'ordres ; `alert_priority`
+    # pour les alertes (crash, coupe-circuit). 2 = "emergency" (répété jusqu'à
+    # acquittement), voir la doc Pushover.
+    priority: int = 0
+    alert_priority: int = 1
+    title: str = "Trading Bot"
+
+
+@dataclass
+class NotificationsConfig:
+    pushover: PushoverConfig = field(default_factory=PushoverConfig)
+
+
+@dataclass
 class LiveConfig:
     loop_interval_seconds: int
     trade_only_when_market_open: bool
@@ -186,6 +213,7 @@ class LiveConfig:
     # nouvelle en rejouant une période déjà connue — voir la docstring du
     # module pour cet avertissement.
     track_record_file: str = "state/symbol_track_record.json"
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
 
 
 @dataclass
@@ -265,6 +293,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     live_raw = dict(raw["live"])
     manual_raw = live_raw.pop("manual", None) or {}
+    notifications_raw = live_raw.pop("notifications", None) or {}
+    pushover_raw = notifications_raw.get("pushover", None) or {}
 
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
@@ -277,7 +307,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             volatility_filter=VolatilityFilterConfig(**volatility_raw),
         ),
         backtest=BacktestConfig(**raw["backtest"]),
-        live=LiveConfig(**live_raw, manual=ManualBrokerConfig(**manual_raw)),
+        live=LiveConfig(
+            **live_raw,
+            manual=ManualBrokerConfig(**manual_raw),
+            notifications=NotificationsConfig(pushover=PushoverConfig(**pushover_raw)),
+        ),
         news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
         optimization=OptimizationConfig(**optimization_raw),
     )

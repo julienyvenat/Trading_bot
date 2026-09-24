@@ -52,6 +52,7 @@ from trading_bot.indicators import atr
 from trading_bot.live.trade_realization import detect_realized_trades, snapshot_positions
 from trading_bot.logger import get_logger
 from trading_bot.market_calendar import MarketCalendar
+from trading_bot.notify.pushover import PushoverNotifier, truncate_lines
 from trading_bot.portfolio.allocator import SignalAllocator
 from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, apply_halt, should_flatten
 from trading_bot.portfolio.regime import latest_regime_scale
@@ -173,6 +174,63 @@ def build_broker(config: AppConfig) -> Broker:
     from trading_bot.execution.alpaca_broker import AlpacaBroker
 
     return AlpacaBroker(load_alpaca_credentials())
+
+
+def build_notifier(config: AppConfig) -> PushoverNotifier:
+    """Notifier Pushover configuré par `config.live.notifications.pushover`
+    (inactif par défaut, voir `trading_bot.notify.pushover`)."""
+    return PushoverNotifier(config.live.notifications.pushover)
+
+
+def notify_cycle_instructions(notifier: PushoverNotifier, broker: Broker) -> None:
+    """Envoie UN SEUL push récapitulant toutes les instructions manuelles
+    (ordres, stops, stops à annuler) affichées pendant le cycle par un broker
+    manuel (voir `ManualBroker.drain_instructions`). Rien n'est envoyé s'il
+    n'y a rien à faire, ni pour un broker automatique (Alpaca)."""
+    drain = getattr(broker, "drain_instructions", None)
+    if drain is None:
+        return
+    try:
+        instructions = drain()
+        if not instructions:
+            return
+        prefixes = {"order": "ORDRE : ", "stop": "STOP : ", "cancel": ""}
+        lines = [prefixes.get(i.kind, "") + i.text for i in instructions]
+        actions = sum(1 for i in instructions if i.kind != "cancel") or len(instructions)
+        notifier.send(f"{actions} ordre(s) à passer", truncate_lines(lines))
+    except Exception:  # noqa: BLE001 - une notification ne doit jamais casser la boucle live
+        logger.warning("Échec de la préparation de la notification des ordres manuels.", exc_info=True)
+
+
+def notify_risk_transitions(
+    notifier: PushoverNotifier, before: RiskState | None, after: RiskState | None
+) -> None:
+    """Alerte (priorité `alert_priority`) au moment où un coupe-circuit se
+    DÉCLENCHE — pas à chaque cycle où il reste actif, pour ne pas spammer."""
+    if after is None:
+        return
+    priority = notifier.alert_priority
+    if after.drawdown_halted and not (before and before.drawdown_halted):
+        notifier.send(
+            "COUPE-CIRCUIT DRAWDOWN",
+            "Coupe-circuit de drawdown déclenché : flatten de toutes les positions, plus aucune entrée "
+            "tant qu'il n'est pas levé manuellement (voir README).",
+            priority=priority,
+        )
+    elif after.daily_halted and not (before and before.daily_halted):
+        notifier.send(
+            "Coupe-circuit journalier",
+            "Perte journalière max atteinte : aucune nouvelle entrée jusqu'à la prochaine séance.",
+            priority=priority,
+        )
+
+
+def notify_cycle_error(notifier: PushoverNotifier, exc: BaseException) -> None:
+    notifier.send(
+        "Erreur de cycle",
+        truncate_lines([f"Le cycle de trading a échoué : {type(exc).__name__}: {exc}", "Voir les logs du bot."]),
+        priority=notifier.alert_priority,
+    )
 
 
 def _fetch_filter_reference(
@@ -507,6 +565,12 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
     """
     broker = build_broker(config)
     calendar = MarketCalendar(config.market.calendar)
+    notifier = build_notifier(config)
+    notifier.warn_if_misconfigured()
+    # Alerte de crash envoyée seulement à la PREMIÈRE erreur d'une série :
+    # une panne persistante (ex: yfinance indisponible) ne doit pas envoyer
+    # un push à chaque cycle.
+    consecutive_errors = 0
 
     state = load_state(config.live.state_file)
     if state.risk_state and state.risk_state.drawdown_halted:
@@ -543,9 +607,20 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
                 time.sleep(min(wait_seconds, MAX_SLEEP_CHUNK_SECONDS))
                 continue
 
+            risk_before = state.risk_state
             state = run_once(config, broker, dry_run=dry_run, state=state)
             save_state(config.live.state_file, state)
-        except Exception:  # noqa: BLE001 - on ne veut jamais crasher la boucle live
+            consecutive_errors = 0
+            notify_risk_transitions(notifier, risk_before, state.risk_state)
+        except Exception as exc:  # noqa: BLE001 - on ne veut jamais crasher la boucle live
             logger.exception("Erreur pendant le cycle de trading, on continue.")
+            consecutive_errors += 1
+            if consecutive_errors == 1:
+                notify_cycle_error(notifier, exc)
+        finally:
+            # Même si le cycle a crashé en cours de route, les ordres DÉJÀ
+            # affichés (et déjà comptabilisés dans `account_file`) doivent
+            # être notifiés : sinon ils ne seraient jamais passés.
+            notify_cycle_instructions(notifier, broker)
 
         time.sleep(config.live.loop_interval_seconds)

@@ -5,6 +5,7 @@ Usage :
     python -m trading_bot walk-forward [--train-days N] [--test-days N] [--step-days N] [--optimize]
     python -m trading_bot optimize [--metric sharpe_ratio] [--max-workers N] [--top N]
     python -m trading_bot paper [--once] [--dry-run]
+    python -m trading_bot notify-test [--config ...]
 """
 
 from __future__ import annotations
@@ -305,7 +306,15 @@ def cmd_optimize(args: argparse.Namespace) -> None:
 
 
 def cmd_paper(args: argparse.Namespace) -> None:
-    from trading_bot.live.engine import build_broker, run_forever, run_once
+    from trading_bot.live.engine import (
+        build_broker,
+        build_notifier,
+        notify_cycle_error,
+        notify_cycle_instructions,
+        notify_risk_transitions,
+        run_forever,
+        run_once,
+    )
     from trading_bot.state import load_state, save_state
 
     logger = setup_logging()
@@ -325,10 +334,13 @@ def cmd_paper(args: argparse.Namespace) -> None:
 
     if args.once:
         broker = build_broker(config)
+        notifier = build_notifier(config)
+        notifier.warn_if_misconfigured()
         state = load_state(config.live.state_file)
+        risk_before = state.risk_state
         try:
             state = run_once(config, broker, dry_run=args.dry_run, state=state)
-        except Exception:
+        except Exception as exc:
             # Comme `run_forever`, on ne veut pas perdre l'état déjà mis à
             # jour par le cycle (stops posés, coupe-circuits) juste parce
             # qu'une erreur inattendue survient en fin de cycle : mieux vaut
@@ -336,10 +348,42 @@ def cmd_paper(args: argparse.Namespace) -> None:
             # perdre silencieusement.
             logger.exception("Erreur pendant le cycle de trading.")
             save_state(config.live.state_file, state)
+            notify_cycle_error(notifier, exc)
             raise
+        finally:
+            notify_cycle_instructions(notifier, broker)
         save_state(config.live.state_file, state)
+        notify_risk_transitions(notifier, risk_before, state.risk_state)
     else:
         run_forever(config, dry_run=args.dry_run)
+
+
+def cmd_notify_test(args: argparse.Namespace) -> None:
+    """Envoie une notification Pushover de test, pour valider les
+    identifiants (`PUSHOVER_APP_TOKEN` / `PUSHOVER_USER_KEY`) avant de
+    compter dessus en live. Fonctionne même si `live.notifications.pushover.
+    enabled` est encore à false dans la config (pour tester avant d'activer)."""
+    from trading_bot.notify.pushover import APP_TOKEN_ENV, USER_KEY_ENV, PushoverNotifier
+
+    logger = setup_logging(log_file=None)
+    config = load_config(args.config)
+    pushover_config = config.live.notifications.pushover
+    notifier = PushoverNotifier(pushover_config)
+
+    if not notifier.has_credentials:
+        logger.error("%s et/ou %s absent(s) de l'environnement (ou de .env).", APP_TOKEN_ENV, USER_KEY_ENV)
+        sys.exit(1)
+    if not pushover_config.enabled:
+        logger.warning(
+            "live.notifications.pushover.enabled est à false dans cette config : le test est envoyé quand "
+            "même, mais le bot n'enverra rien en live tant que ce n'est pas activé."
+        )
+
+    if notifier.send("Test", "Notification de test : les identifiants Pushover fonctionnent.", force=True):
+        logger.info("Notification de test envoyée : vérifie ton téléphone.")
+    else:
+        logger.error("Échec de l'envoi de la notification de test (voir l'avertissement ci-dessus).")
+        sys.exit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -433,6 +477,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Calcule les ordres mais ne les envoie pas au broker."
     )
     paper_parser.set_defaults(func=cmd_paper)
+
+    notify_test_parser = subparsers.add_parser(
+        "notify-test",
+        help="Envoie une notification Pushover de test (valide PUSHOVER_APP_TOKEN / PUSHOVER_USER_KEY).",
+        parents=[config_parser],
+    )
+    notify_test_parser.set_defaults(func=cmd_notify_test)
 
     return parser
 

@@ -24,6 +24,11 @@ sur la réalité du compte.
 Les prix (dont ceux utilisés pour calculer l'equity) viennent de yfinance,
 pas d'un flux temps réel du courtier : suffisant pour une utilisation à la
 séance (quelques cycles par jour), pas pour de l'intraday serré.
+
+Chaque instruction affichée est aussi mémorisée (`drain_instructions`) pour
+que le moteur live puisse en envoyer un récapitulatif unique par cycle (push
+Pushover, voir `trading_bot.notify.pushover`) plutôt que de devoir surveiller
+les logs.
 """
 
 from __future__ import annotations
@@ -31,12 +36,23 @@ from __future__ import annotations
 import json
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from trading_bot.execution.broker_base import AccountInfo, Broker, Position
 from trading_bot.logger import get_logger
 
 logger = get_logger()
+
+
+@dataclass
+class ManualInstruction:
+    """Instruction à exécuter à la main sur le courtier. `kind` : "order"
+    (ordre au marché), "stop" (stop à poser) ou "cancel" (ancien stop à
+    annuler/remplacer)."""
+
+    kind: str
+    text: str
 
 
 class ManualBroker(Broker):
@@ -50,6 +66,13 @@ class ManualBroker(Broker):
             )
         self._calendar_name = calendar_name
         self._price_cache: dict[str, float] = {}
+        self._pending_instructions: list[ManualInstruction] = []
+
+    def drain_instructions(self) -> list[ManualInstruction]:
+        """Renvoie puis oublie les instructions affichées depuis le dernier
+        appel (utilisé par le moteur live pour notifier une fois par cycle)."""
+        instructions, self._pending_instructions = self._pending_instructions, []
+        return instructions
 
     def _load(self) -> dict:
         with open(self._path, encoding="utf-8") as f:
@@ -115,14 +138,15 @@ class ManualBroker(Broker):
 
         price = self.get_last_price(symbol)
         notional = qty * price
-        logger.warning(
-            "ORDRE MANUEL À PASSER SUR TON COURTIER : %s %.4f %s (≈ %.2f € au dernier cours de %.2f €)",
+        instruction = "%s %d %s (≈ %.2f € au dernier cours de %.2f €)" % (
             "ACHETER" if side == "buy" else "VENDRE",
             qty,
             symbol,
             notional,
             price,
         )
+        logger.warning("ORDRE MANUEL À PASSER SUR TON COURTIER : %s", instruction)
+        self._pending_instructions.append(ManualInstruction("order", instruction))
 
         data = self._load()
         cash = float(data.get("cash", 0.0))
@@ -149,13 +173,14 @@ class ManualBroker(Broker):
         self._save(data)
 
     def submit_stop_order(self, symbol: str, qty: float, side: str, stop_price: float) -> str:
-        logger.warning(
-            "STOP MANUEL À POSER SUR TON COURTIER : %s %d %s si le cours atteint %.2f €",
+        instruction = "%s %d %s si le cours atteint %.2f €" % (
             "ACHETER" if side == "buy" else "VENDRE",
             math.floor(qty),
             symbol,
             stop_price,
         )
+        logger.warning("STOP MANUEL À POSER SUR TON COURTIER : %s", instruction)
+        self._pending_instructions.append(ManualInstruction("stop", instruction))
         # Pas d'ordre réel côté courtier à référencer : identifiant purement
         # interne, pour que `trading_bot.state.LiveState.stop_order_ids`
         # continue de fonctionner (détection de stop "posé"/"à reposer").
@@ -166,6 +191,10 @@ class ManualBroker(Broker):
             "Pense à annuler ou remplacer à la main le stop précédent sur ton courtier (référence interne %s).",
             order_id,
         )
+        # Référence interne au format `manual-<symbole>-<timestamp>` (voir
+        # `submit_stop_order`) : on en extrait le symbole pour un message lisible.
+        symbol = order_id[len("manual-") :].rsplit("-", 1)[0] if order_id.startswith("manual-") else order_id
+        self._pending_instructions.append(ManualInstruction("cancel", f"Annuler le stop précédent sur {symbol}"))
 
     def is_market_open(self) -> bool:
         from trading_bot.market_calendar import MarketCalendar

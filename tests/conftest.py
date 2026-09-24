@@ -83,3 +83,21 @@ def trending_down_df() -> pd.DataFrame:
 def flat_df() -> pd.DataFrame:
     prices = np.full(120, 50.0)
     return make_ohlcv(prices)
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_pushover_requests(monkeypatch):
+    """Aucun test ne doit envoyer de vraie notification Pushover (réseau) :
+    `pytest.fail` lève une `BaseException`, donc n'est PAS avalée par le
+    `except Exception` de `PushoverNotifier.send` — un appel réseau
+    accidentel fait bien échouer le test. Les tests qui simulent l'API
+    remplacent ce garde-fou par leur propre faux `urlopen`. Les identifiants
+    éventuellement présents dans l'environnement du développeur sont aussi
+    retirés, pour que chaque test parte d'un état connu."""
+
+    def _no_network(*args, **kwargs):
+        pytest.fail("Un test tente d'envoyer une vraie notification Pushover (appel réseau).")
+
+    monkeypatch.setattr("trading_bot.notify.pushover.urllib.request.urlopen", _no_network)
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
+    monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)

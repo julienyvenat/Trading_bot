@@ -359,6 +359,37 @@ l'univers tradé et comme référence du `market.regime_filter`. GLD et VIXY,
 sans équivalent éligible PEA, sont exclus : pas de `defensive_rotation`, et
 `market.volatility_filter` désactivé.
 
+#### Notifications Pushover (ordres à passer sur ton téléphone)
+
+En mode manuel, plutôt que de surveiller les logs, le bot peut t'envoyer via
+[Pushover](https://pushover.net) **un seul push par cycle** récapitulant tous
+les ordres et stops à passer sur ton courtier (titre du type « Trading Bot PEA
+— 3 ordre(s) à passer », message tronqué proprement à 1024 caractères ; aucun
+push si rien à faire), ainsi qu'une alerte quand un cycle crashe (première
+erreur d'une série seulement) ou qu'un coupe-circuit se déclenche.
+
+1. Crée un compte sur https://pushover.net, installe l'app Pushover sur ton
+   téléphone et note ta **User Key** (tableau de bord).
+2. Crée une application (« Create an Application/API Token ») et note son
+   **API Token**.
+3. Renseigne-les dans `.env` (jamais dans la config YAML ni dans le dépôt) :
+
+   ```bash
+   PUSHOVER_APP_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   PUSHOVER_USER_KEY=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   ```
+
+4. Active `live.notifications.pushover.enabled: true` (déjà le cas dans
+   `config/config_pea_fortuneo.example.yaml`) et vérifie :
+
+   ```bash
+   python -m trading_bot notify-test --config config/config_pea_fortuneo.example.yaml
+   ```
+
+Une panne de Pushover (réseau, identifiants invalides ou absents) ne fait
+jamais échouer le cycle de trading : elle est simplement journalisée en
+avertissement. Désactivé par défaut dans les autres configs.
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
