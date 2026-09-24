@@ -353,6 +353,12 @@ réel diffère (prix, ou ordre pas encore passé) avant le prochain cycle.
 Contrairement à Alpaca, les quantités sont arrondies à l'action entière (pas
 de fractionnaire sur un PEA).
 
+Univers PEA : SPY n'étant pas éligible, il est remplacé par **PSP5**
+(`PSP5.PA`, Amundi PEA S&P 500 UCITS ETF, Euronext Paris), à la fois dans
+l'univers tradé et comme référence du `market.regime_filter`. GLD et VIXY,
+sans équivalent éligible PEA, sont exclus : pas de `defensive_rotation`, et
+`market.volatility_filter` désactivé.
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot

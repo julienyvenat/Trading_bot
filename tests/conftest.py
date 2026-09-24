@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,29 @@ def _isolate_trading_bot_log(monkeypatch, tmp_path):
     modifier chaque appelant individuellement."""
     tmp_log = tmp_path / "trading_bot_test.log"
     monkeypatch.setattr(setup_logging, "__defaults__", (logging.INFO, str(tmp_log)))
+
+
+_LIVE_STATE_DIR = (Path(__file__).resolve().parents[1] / "state").resolve()
+
+
+@pytest.fixture(autouse=True)
+def _forbid_writing_live_track_record(monkeypatch):
+    """Fait échouer tout test qui écrirait dans `state/` du dépôt (ex:
+    `state/symbol_track_record.json`, la base de suivi par symbole RÉELLE du
+    bot live, chemin par défaut de `LiveConfig.track_record_file`) au lieu
+    d'un `tmp_path` : ça y injecterait de faux trades (ex: symbole "ORPHAN")."""
+    import trading_bot.live.engine as engine_module
+    import trading_bot.portfolio.symbol_track_record as track_record_module
+
+    real_save = track_record_module.save_track_record
+
+    def guarded_save(path, record):
+        if _LIVE_STATE_DIR in Path(path).resolve().parents:
+            raise AssertionError(f"Un test tente d'écrire dans l'état live du bot : {path}")
+        return real_save(path, record)
+
+    monkeypatch.setattr(track_record_module, "save_track_record", guarded_save)
+    monkeypatch.setattr(engine_module, "save_track_record", guarded_save)
 
 
 def make_ohlcv(prices: np.ndarray, start: str = "2020-01-01") -> pd.DataFrame:

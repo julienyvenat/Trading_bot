@@ -112,12 +112,16 @@ def uptrend_bars() -> pd.DataFrame:
     )
 
 
-def test_run_once_prices_and_flattens_positions_outside_universe(monkeypatch, uptrend_bars):
+def test_run_once_prices_and_flattens_positions_outside_universe(monkeypatch, tmp_path, uptrend_bars):
     """Une position ouverte sur un symbole retiré de config.yaml (ici ORPHAN,
     absent de config.symbols) doit quand même être valorisée et liquidée,
     plutôt que d'être ignorée faute de prix (régression du bug rencontré en
     dry-run : positions MDB/RIVN/PLTR/SHOP restées orphelines)."""
     config = make_config()
+    # La liquidation d'ORPHAN est un trade réalisé : sans ce chemin temporaire,
+    # il serait écrit dans `state/symbol_track_record.json`, la base RÉELLE du
+    # bot live (voir la garde `_forbid_writing_live_track_record` du conftest).
+    config.live.track_record_file = str(tmp_path / "track_record.json")
 
     monkeypatch.setattr(engine_module, "load_alpaca_credentials", lambda: object())
     monkeypatch.setattr(engine_module, "fetch_latest_bars", lambda symbols, timeframe, credentials: {"UP": uptrend_bars})
