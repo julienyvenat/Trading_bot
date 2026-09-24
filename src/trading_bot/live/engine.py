@@ -50,7 +50,10 @@ Mode PEA manuel (`live.broker: "manual"`) — ajouts :
   - `live.alerts` : alertes d'information (clôture sous SMA, drawdown du
     compte), notifiées au franchissement uniquement ;
   - `live.daily_run_after` : un seul cycle par jour de bourse, après la
-    clôture (voir `seconds_until_daily_run`).
+    clôture (voir `seconds_until_daily_run`) ;
+  - stratégie `core_satellite` : allocation passive à poids cibles, cycle
+    dédié (voir `trading_bot.live.core_satellite`) à la place du pipeline
+    signaux -> risque -> ordres.
 """
 
 from __future__ import annotations
@@ -71,6 +74,7 @@ from trading_bot.market_calendar import MarketCalendar
 from trading_bot.notify.pushover import PushoverNotifier, truncate_lines
 from trading_bot.portfolio.allocator import SignalAllocator
 from trading_bot.portfolio.circuit_breaker import CircuitBreaker, RiskState, apply_halt, should_flatten
+from trading_bot.portfolio.core_satellite import core_satellite_params
 from trading_bot.portfolio.fees import CommissionModel, ExecutionRules
 from trading_bot.portfolio.regime import latest_regime_scale
 from trading_bot.portfolio.risk import RiskManager
@@ -574,13 +578,21 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     account = broker.get_account()
     positions = broker.get_positions()
     current_qty = {symbol: pos.qty for symbol, pos in positions.items()}
+    core_satellite = core_satellite_params(config)
 
     # On récupère aussi le prix des positions ouvertes en dehors de l'univers
     # configuré (ex. symbole retiré de config.yaml, ou position ouverte
     # manuellement) : sans leur prix, `plan_orders` ne peut jamais les
     # liquider et elles restent orphelines indéfiniment, sans stop suiveur.
     orphan_symbols = set(current_qty) - set(config.symbols)
-    if orphan_symbols:
+    if orphan_symbols and core_satellite is not None:
+        logger.warning(
+            "Position(s) hors des poches du plan cœur-satellite : %s. Ignorée(s) : ni comptée(s) dans les "
+            "poids, ni vendue(s).",
+            ", ".join(sorted(orphan_symbols)),
+        )
+        orphan_symbols = set()
+    elif orphan_symbols:
         logger.warning(
             "Position(s) hors de l'univers configuré détectée(s) : %s. Elles seront liquidées "
             "(aucune stratégie ni stop suiveur ne les gère tant qu'elles ne sont pas dans "
@@ -612,6 +624,25 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
             state.stop_order_ids.pop(symbol, None)
             state.stop_order_dates.pop(symbol, None)
             state.trailing_stops.pop(symbol, None)
+
+    if core_satellite is not None:
+        from trading_bot.live.core_satellite import run_core_satellite_cycle
+
+        return run_core_satellite_cycle(
+            config,
+            core_satellite,
+            broker,
+            dry_run,
+            state,
+            data_by_symbol,
+            account,
+            positions,
+            last_prices,
+            realized_trades,
+            now_ts,
+            note=_note,
+            update_track_record=_update_track_record,
+        )
 
     stop_mode, native_stops = _effective_stop_mode(config)
     rules = ExecutionRules.from_backtest_config(config.backtest)

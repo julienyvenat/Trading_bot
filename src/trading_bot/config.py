@@ -198,6 +198,13 @@ class BacktestConfig:
     # stratégie à long lookback reste inactive la première année du
     # backtest. 0 (défaut) : comportement inchangé.
     warmup_days: int = 0
+    # Apport mensuel simulé (en €), versé en cash à l'ouverture du premier
+    # jour de bourse de chaque mois (pas le mois de départ). Uniquement
+    # supporté par le mode `core_satellite` (voir `trading_bot.backtest.
+    # core_satellite`), qui calcule alors un rendement pondéré par le temps
+    # (NAV par part, hors effet des apports) ET un TRI (rendement pondéré
+    # par l'argent). 0 (défaut) : aucun apport, comportement inchangé.
+    monthly_contribution: float = 0.0
 
 
 @dataclass
@@ -235,6 +242,14 @@ class AlertsConfig:
     symbol: str = "PSP5.PA"
     sma_window: int = 200
     drawdown_pct: float = 0.20
+    # Mode `core_satellite` uniquement (voir `trading_bot.live.engine`) :
+    # paliers de drawdown du portefeuille (NAV par part, donc hors effet des
+    # apports), chacun notifié une seule fois au franchissement, avec un
+    # rappel du plan ("ne vends pas, c'est prévu") ; et paliers de baisse
+    # d'une poche depuis son plus haut, ex {"CL2.PA": [0.30, 0.50]}. Vides
+    # (défaut) : rien de plus que les alertes ci-dessus.
+    drawdown_levels: list[float] = field(default_factory=list)
+    symbol_drop_levels: dict[str, list[float]] = field(default_factory=dict)
 
 
 @dataclass

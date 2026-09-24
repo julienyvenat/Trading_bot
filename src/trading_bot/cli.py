@@ -163,6 +163,14 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     years = max(result.metrics.num_trading_days / 252, 1e-9)
     print(f"Ordres exécutés         : {result.num_orders} ({result.num_orders / years:.1f}/an)")
     print(f"Frais payés (total)     : {result.total_fees:.2f}")
+    if result.money_weighted_return_pct is not None and result.total_contributed > config.backtest.initial_cash:
+        final_value = float(result.equity_curve.iloc[-1])
+        print(
+            f"Apports : {result.total_contributed:.2f} versés au total, valeur finale {final_value:.2f} "
+            f"(x{final_value / result.total_contributed:.2f}) ; TRI (pondéré par l'argent) : "
+            f"{result.money_weighted_return_pct:+.2f}%/an. Les métriques ci-dessus portent sur la NAV par "
+            "part (hors effet des apports)."
+        )
     if result.final_risk_state and result.final_risk_state.drawdown_halted:
         print(
             "⚠️  Coupe-circuit de DRAWDOWN déclenché à un moment du backtest "

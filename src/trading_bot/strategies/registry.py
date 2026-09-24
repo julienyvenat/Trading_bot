@@ -6,6 +6,7 @@ from trading_bot.config import StrategyConfig
 from trading_bot.strategies.base import Strategy
 from trading_bot.strategies.bollinger_scalping import BollingerScalpingStrategy
 from trading_bot.strategies.buy_and_hold import BuyAndHoldStrategy
+from trading_bot.strategies.core_satellite import CoreSatelliteStrategy
 from trading_bot.strategies.defensive_rotation import DefensiveRotationStrategy
 from trading_bot.strategies.dual_momentum import DualMomentumStrategy
 from trading_bot.strategies.momentum_breakout import MomentumBreakoutStrategy
@@ -22,6 +23,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     BollingerScalpingStrategy.name: BollingerScalpingStrategy,
     BuyAndHoldStrategy.name: BuyAndHoldStrategy,
     DualMomentumStrategy.name: DualMomentumStrategy,
+    CoreSatelliteStrategy.name: CoreSatelliteStrategy,
 }
 
 

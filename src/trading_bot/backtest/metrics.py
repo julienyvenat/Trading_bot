@@ -171,3 +171,55 @@ def compute_metrics(
         num_trading_days=num_days,
         **_trade_stats(trades),
     )
+
+
+def money_weighted_return(
+    flows: list[tuple[pd.Timestamp, float]], end: pd.Timestamp, final_value: float
+) -> float | None:
+    """TRI annualisé (rendement pondéré par l'argent) : taux r tel que la
+    somme des versements `flows` (date, montant > 0 versé) capitalisés à r
+    jusqu'à `end` égale `final_value`. Résolu par dichotomie (la fonction
+    est monotone en r pour des versements tous positifs). None si indéfini."""
+    flows = [(pd.Timestamp(d), float(a)) for d, a in flows if a]
+    if not flows or final_value <= 0:
+        return None
+    end = pd.Timestamp(end)
+
+    def future_value(rate: float) -> float:
+        return sum(a * (1 + rate) ** ((end - d).days / 365.25) for d, a in flows)
+
+    low, high = -0.99, 10.0
+    if not future_value(low) <= final_value <= future_value(high):
+        return None
+    for _ in range(200):
+        mid = (low + high) / 2
+        if future_value(mid) < final_value:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2
+
+
+def worst_rolling_return(curve: pd.Series, window: int = TRADING_DAYS_PER_YEAR) -> float | None:
+    """Pire rendement sur `window` séances glissantes (ex: pire 12 mois)."""
+    curve = curve.dropna()
+    if len(curve) <= window:
+        return None
+    return float((curve / curve.shift(window) - 1).min())
+
+
+def max_drawdown_recovery(curve: pd.Series) -> tuple[pd.Timestamp | None, pd.Timestamp | None, pd.Timestamp | None]:
+    """(date du plus haut précédant le pire creux, date du creux, date où la
+    courbe retrouve ce plus haut — None si jamais retrouvé)."""
+    curve = curve.dropna()
+    if curve.empty:
+        return None, None, None
+    drawdown = curve / curve.cummax() - 1
+    trough = drawdown.idxmin()
+    if drawdown.loc[trough] >= 0:
+        return None, None, None
+    peak_value = curve.loc[:trough].max()
+    peak = curve.loc[:trough].idxmax()
+    after = curve.loc[trough:]
+    recovered = after[after >= peak_value]
+    return peak, trough, (recovered.index[0] if not recovered.empty else None)

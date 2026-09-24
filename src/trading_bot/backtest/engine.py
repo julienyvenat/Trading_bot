@@ -82,6 +82,13 @@ class BacktestResult:
     # passer à la main sur un compte sans API.
     total_fees: float = 0.0
     num_orders: int = 0
+    # Mode `core_satellite` avec apports (voir `trading_bot.backtest.
+    # core_satellite`) : NAV par part (rendement pondéré par le temps, base
+    # de `metrics`), total versé (capital initial + apports) et TRI annualisé
+    # en %. Hors de ce mode : None / capital initial.
+    nav_curve: pd.Series | None = None
+    total_contributed: float = 0.0
+    money_weighted_return_pct: float | None = None
 
 
 def _portfolio_value(positions: dict[str, float], prices: pd.Series) -> float:
@@ -185,6 +192,19 @@ def run_backtest(
     """
     if not data_by_symbol:
         raise ValueError("Aucune donnée historique fournie pour le backtest.")
+
+    from trading_bot.portfolio.core_satellite import core_satellite_params
+
+    core_satellite = core_satellite_params(config)
+    if core_satellite is not None:
+        from trading_bot.backtest.core_satellite import run_core_satellite_backtest
+
+        return run_core_satellite_backtest(config, data_by_symbol, core_satellite)
+    if config.backtest.monthly_contribution:
+        raise ValueError(
+            "`backtest.monthly_contribution` n'est supporté que par la stratégie core_satellite "
+            "(les métriques des autres modes ne savent pas séparer apports et performance)."
+        )
 
     strategies_with_weights = build_enabled_strategies(config.strategies)
     if not strategies_with_weights:
@@ -469,4 +489,5 @@ def run_backtest(
         trades=trade_tracker.completed_trades,
         total_fees=stats["fees"],
         num_orders=stats["orders"],
+        total_contributed=float(config.backtest.initial_cash),
     )

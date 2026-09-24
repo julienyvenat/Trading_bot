@@ -30,6 +30,11 @@ le courtier (écart figé, plus haut de référence, quantité, dernière bougie
 examinée), les symboles sortis sur stop en attente de ré-entrée, l'état des
 alertes d'information (pour ne notifier qu'au franchissement) et la date du
 dernier cycle quotidien.
+
+Mode `core_satellite` : `core_satellite` garde la comptabilité par parts
+(NAV hors apports, plus haut, dernier cash/quantités vus pour détecter un
+apport), l'année du dernier rééquilibrage calendaire et les plus hauts des
+poches suivies par les alertes de baisse.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ class LiveState:
     stopped_out: dict[str, str] = field(default_factory=dict)
     alert_flags: dict[str, bool] = field(default_factory=dict)
     last_daily_run: str | None = None
+    core_satellite: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +87,7 @@ class LiveState:
             "stopped_out": dict(self.stopped_out),
             "alert_flags": dict(self.alert_flags),
             "last_daily_run": self.last_daily_run,
+            "core_satellite": json.loads(json.dumps(self.core_satellite)),
         }
 
     @classmethod
@@ -105,6 +112,7 @@ class LiveState:
             stopped_out=dict(data.get("stopped_out", {})),
             alert_flags=dict(data.get("alert_flags", {})),
             last_daily_run=data.get("last_daily_run"),
+            core_satellite=dict(data.get("core_satellite", {}) or {}),
         )
 
 
