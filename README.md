@@ -390,6 +390,111 @@ Une panne de Pushover (réseau, identifiants invalides ou absents) ne fait
 jamais échouer le cycle de trading : elle est simplement journalisée en
 avertissement. Désactivé par défaut dans les autres configs.
 
+#### PEA Fortuneo v2 : buy & hold PSP5 ou rotation mensuelle d'ETF
+
+Constat de départ : la config active `config_pea_fortuneo.example.yaml`
+(actions du CAC 40 + 3 stratégies journalières, boucle horaire) perd de
+l'argent une fois les frais réels comptés — backtest 2018→09/2026 avec
+2 306,59 €, barème Fortuneo et actions entières : **-19,8 %** (≈ 28 ordres/an,
+480 € de frais, coupe-circuit de drawdown -20 % déclenché en route), contre **+237,5 %** pour un simple achat de PSP5. Deux modes
+à faible rotation la remplacent :
+
+| Mode | Config | Principe | Ordres à passer |
+|---|---|---|---|
+| (a) Buy & hold | `config/config_pea_buyhold.example.yaml` | 100 % PSP5 en actions entières, jamais revendu ; pas de stop, alertes d'information seulement (PSP5 sous sa SMA200, compte à -20 % de son plus haut) | 1 à l'entrée, puis ~0 |
+| (b) Dual momentum | `config/config_pea_etf_momentum.example.yaml` | 1 fois par mois : l'ETF au meilleur rendement 12 mois parmi PSP5 / PUST / CAC / ETZ / PAEEM, s'il est positif ; sinon cash | ~6/an |
+
+**Hypothèses de frais** (`backtest.commission_schedule`, voir
+`trading_bot.portfolio.fees`, utilisées aussi en live) : barème standard
+Fortuneo sur Euronext — ordre ≤ 500 € : 0,50 % (min 1,95 €) ; 500 à 2 000 € :
+1,95 € ; > 2 000 € : 0,20 %. La promo « frais d'achat remboursés sur une
+sélection d'ETF Amundi (ordres de 500 à 100 000 €) jusqu'au 31/12/2026 »
+n'est **pas** modélisée (prudence). `backtest.whole_shares: true` : actions
+entières, achats plafonnés au cash frais compris ; `min_order_value: 150`,
+`max_fee_pct: 0.02` et `rebalance_tolerance_pct: 0.10` écartent les ordres
+qui ne valent pas leurs frais (une clôture complète passe toujours).
+Exécution à l'ouverture du lendemain du signal, comme le reste du backtest.
+
+**Résultats** (2018-01-01 → 2026-09-24, 2 306,59 € de départ, reproduire
+avec `python scripts/pea_compare.py`). (a) — choix du stop :
+
+| Variante | Total | CAGR | Max DD | Sharpe | Calmar | Ordres/an | Frais |
+|---|---|---|---|---|---|---|---|
+| **Buy & hold PSP5, sans stop** | +237,9 % | +14,7 % | -33,6 % | **0,91** | 0,44 | 0,1 | 4,59 € |
+| Stop suiveur ATR×4 (écart figé à l'entrée) | +106,6 % | +8,5 % | -26,1 % | 0,69 | 0,33 | 7,6 | 382 € |
+| Stop suiveur ATR×6 | +120,0 % | +9,3 % | -23,8 % | 0,71 | 0,39 | 2,8 | 158 € |
+| Stop suiveur ATR×8 | +131,3 % | +9,9 % | -25,2 % | 0,72 | 0,39 | 1,2 | 58 € |
+| Stop suiveur 15 % | +93,9 % | +7,8 % | -30,2 % | 0,59 | 0,26 | 1,5 | 69 € |
+| Stop suiveur 20 % | +170,8 % | +11,9 % | -21,3 % | 0,84 | 0,56 | 0,6 | 35 € |
+| Stop suiveur 25 % | +132,7 % | +10,0 % | -27,1 % | 0,71 | 0,37 | 0,6 | 31 € |
+
+Stops modélisés comme un Stop Suiveur Fortuneo (seuil = plus haut depuis
+l'entrée × (1 - écart), exécuté au seuil ou à l'ouverture en cas de gap), avec
+ré-entrée seulement quand PSP5 repasse au-dessus de sa SMA200 (sinon on
+rachèterait le lendemain). Seul le stop 20 % améliore le Calmar sur toute la
+période, grâce au seul krach de mars 2020 — mais il coûte ~3 points de CAGR,
+son Sharpe reste inférieur, et hors échantillon (2023→) il est moins bon que
+le buy & hold sur tous les critères (CAGR 14,7 % vs 18,8 %, DD -20,8 % vs
+-23,1 %, Sharpe 1,17 vs 1,33). **Défaut retenu : pas de stop**, alertes
+d'information uniquement.
+
+(b) — petite grille (lookback 6/12 mois × top 1/2), rien d'autre d'optimisé :
+
+| Variante | 2018→2026 CAGR / DD / Sharpe | En échantillon 2018-2022 | Hors échantillon 2023→ | Ordres/an | Frais |
+|---|---|---|---|---|---|
+| Référence buy & hold PSP5 | +14,7 % / -33,6 % / 0,91 | +11,3 % / -33,6 % / 0,67 | +18,8 % / -23,1 % / 1,33 | 0,1 | 5 € |
+| **12 mois, top 1** (retenu sur 2018-2022) | +13,0 % / -31,5 % / 0,74 | +8,7 % / -29,6 % / 0,52 | +19,1 % / -24,6 % / 1,08 | 5,8 | 370 € |
+| 12 mois, top 2 | +12,3 % / -30,6 % / 0,76 | +7,6 % / -30,6 % / 0,50 | +19,1 % / -25,2 % / 1,19 | 6,0 | 142 € |
+| 6 mois, top 1 | +11,1 % / -28,1 % / 0,66 | +5,4 % / -28,1 % / 0,37 | +18,5 % / -26,5 % / 1,04 | 8,0 | 473 € |
+| 6 mois, top 2 | +6,9 % / -30,5 % / 0,50 | -0,0 % / -30,5 % / 0,08 | +16,6 % / -24,3 % / 1,06 | 9,5 | 166 € |
+
+Honnêtement : **(b) ne bat pas le buy & hold PSP5**, ni sur toute la période
+ni hors échantillon en ajusté du risque (drawdown à peine réduit, Sharpe plus
+faible, ~6 ordres/an à passer à la main). Biais à garder en tête : l'univers
+contient le Nasdaq-100, choisi en sachant qu'il a été le grand gagnant de la
+période ; PAEEM n'a d'historique yfinance que depuis 04/2019. Pas d'actif
+« refuge » PEA satisfaisant en risk-off : les ETF monétaires (CSH, C3M, XEON)
+ne sont pas éligibles et OBLI.PA (Amundi PEA Euro Court Terme) a perdu ~22 %
+en 2021-2022 — la case vide reste donc en cash.
+
+**Recommandation : mode (a).** Ce sont des backtests (une seule trajectoire
+historique, dominée par le marché US 2018-2026) : ils ne garantissent rien,
+et un buy & hold à 100 % actions implique d'accepter des baisses de -30 % ou
+plus sans rien faire.
+
+**Lancer** (créer d'abord le fichier de compte avec le cash réellement
+disponible — hors lignes que le bot ne gère pas) :
+
+```bash
+cp config/config_pea_buyhold.example.yaml config/config_pea_buyhold.yaml
+echo '{"cash": 2306.59, "positions": {}}' > state/manual_account_pea_buyhold.json
+python -m trading_bot backtest --config config/config_pea_buyhold.yaml
+python -m trading_bot paper --config config/config_pea_buyhold.yaml --once   # un cycle, pour voir
+python -m trading_bot paper --config config/config_pea_buyhold.yaml          # 1 cycle / jour de bourse à 18h30
+```
+
+`live.daily_run_after: "18:30"` : un seul cycle par jour de bourse, après la
+clôture d'Euronext (signal sur la clôture du jour, ordre à passer le
+lendemain matin — même convention que le backtest). Exemple de premier push
+(cours du 24/09/2026) :
+
+```
+PEA buy & hold — 1 ordre(s) à passer
+ORDRE : ACHETER 38 PSP5 — ordre au marché (ou à cours limité 59,72 €) · ≈ 2 257,96 € au cours de 59,42 €, frais ≈ 4,52 €
+INFO : Pas de stop à poser sur PSP5 (risk.stop_mode: none, choix de cette config — voir README : …). Alertes d'information actives (SMA / drawdown).
+```
+
+**Stop Suiveur natif** (`live.manual.native_trailing_stop: true` avec
+`risk.stop_mode: trailing_pct`) : l'écart est figé en % à l'entrée
+(`risk.trailing_stop_pct`, ou `atr_stop_multiple` × ATR / cours), le bot
+demande de poser l'ordre **une seule fois** — « Poser un STOP SUIVEUR : vendre
+38 PSP5, écart 20,0 % (≈ 11,88 €), seuil de départ 47,54 € » — puis ne
+notifie plus rien tant que la position ne change pas (Fortuneo remonte le
+seuil lui-même). Il rejoue les plus hauts/bas yfinance pour détecter un
+déclenchement probable, comptabilise alors la vente et envoie une alerte « à
+vérifier » ; avant toute vente décidée par la stratégie, il demande d'annuler
+le stop. Pas d'ordre Duo/Trio : ces stratégies n'ont pas d'objectif de gain.
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
@@ -435,13 +540,16 @@ src/trading_bot/
     base.py              # classe abstraite Strategy
     sma_crossover.py, rsi_mean_reversion.py, momentum_breakout.py
     relative_strength.py  # rotation sectorielle / force relative (cross-sectionnelle)
+    buy_and_hold.py        # toujours investi (mode PEA buy & hold)
+    dual_momentum.py        # rotation mensuelle momentum relatif + absolu (mode PEA ETF)
     defensive_rotation.py # rotation vers un actif défensif (cross-sectionnelle)
     bollinger_scalping.py  # retour à la moyenne intraday (scalping)
     registry.py           # fabrique de stratégies à partir de la config
   portfolio/
     allocator.py          # combine les signaux de plusieurs stratégies
     risk.py                # dimensionnement des positions + caps de risque
-    stops.py                # stop-loss suiveur ATR (logique pure)
+    stops.py                # stop-loss suiveur ATR / en % "Stop Suiveur natif" (logique pure)
+    fees.py                  # barème de frais par paliers, actions entières, garde-fous d'ordres
     circuit_breaker.py        # coupe-circuits perte journalière / drawdown
     regime.py                  # filtre de régime de marché (SMA du benchmark)
     universe_rotation.py         # rotation périodique de l'univers tradé, par stratégie

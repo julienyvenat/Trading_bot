@@ -81,6 +81,25 @@ class RiskConfig:
     max_open_positions: int
     max_daily_loss_pct: float
     max_drawdown_pct: float
+    # Type de stop suiveur (voir `trading_bot.portfolio.stops`) :
+    #   - "atr" (défaut, inchangé) : stop = clôture - `atr_stop_multiple` x
+    #     ATR, recalculé et "ratcheté" à chaque pas de temps sur la clôture ;
+    #   - "trailing_pct" : sémantique d'un ordre "Stop Suiveur" natif de
+    #     courtier (ex: Fortuneo) — écart en % FIGÉ à l'entrée
+    #     (`trailing_stop_pct`, ou à défaut `atr_stop_multiple` x ATR / prix
+    #     au moment de l'entrée), stop = plus haut atteint depuis l'entrée x
+    #     (1 - écart), le courtier le remontant en continu ;
+    #   - "none" : aucun stop (ex: buy & hold pur).
+    stop_mode: str = "atr"
+    trailing_stop_pct: float | None = None
+    # Après une sortie sur stop, quand ré-autoriser une entrée sur ce symbole :
+    #   - "immediate" (défaut, inchangé) : dès le signal suivant ;
+    #   - "sma" : seulement quand la clôture repasse au-dessus de sa SMA
+    #     `stop_reentry_sma_window` (évite, pour une stratégie toujours
+    #     investie comme `buy_and_hold`, de racheter dès le lendemain d'un
+    #     stop, ce qui rendrait le stop inutile tout en payant les frais).
+    stop_reentry: str = "immediate"
+    stop_reentry_sma_window: int = 200
 
 
 @dataclass
@@ -149,6 +168,36 @@ class BacktestConfig:
     # (voir `trading_bot.config.load_alpaca_credentials`), pas seulement
     # pour le live.
     data_source: str = "yfinance"
+    # Barème de frais par paliers (voir `trading_bot.portfolio.fees`),
+    # prioritaire sur `commission_pct` quand renseigné. Format :
+    #   {"tiers": [{"up_to": 500, "pct": 0.005, "min": 1.95},
+    #              {"up_to": 2000, "fixed": 1.95},
+    #              {"up_to": null, "pct": 0.002}],
+    #    "minimum": 0.0}
+    # None (défaut) : `commission_pct` proportionnel pur (inchangé).
+    # Utilisé AUSSI en live (broker manuel : frais estimés affichés et
+    # déduits du cash, et garde-fou `max_fee_pct`) pour garder la parité
+    # backtest/live.
+    commission_schedule: dict[str, Any] | None = None
+    # Actions entières uniquement (PEA) : quantités arrondies vers le bas, et
+    # achats plafonnés au cash disponible frais compris (pas de marge sur un
+    # PEA). False (défaut) : quantités fractionnaires, comportement inchangé.
+    whole_shares: bool = False
+    # Garde-fous anti-frais (backtest ET live), jamais appliqués à une
+    # clôture complète de position (une sortie décidée par la stratégie doit
+    # toujours passer) : ordre ignoré si sa valeur < `min_order_value`, ou si
+    # ses frais dépassent `max_fee_pct` de sa valeur, ou (ajustement d'une
+    # position existante, pas une entrée) si l'écart de poids cible/actuel
+    # est < `rebalance_tolerance_pct` — évite les micro-rééquilibrages dus à
+    # la simple dérive des prix.
+    min_order_value: float = 0.0
+    max_fee_pct: float | None = None
+    rebalance_tolerance_pct: float = 0.0
+    # Jours calendaires d'historique téléchargés AVANT `start_date` pour
+    # "chauffer" les indicateurs (SMA200, momentum 12 mois...) : sans ça, une
+    # stratégie à long lookback reste inactive la première année du
+    # backtest. 0 (défaut) : comportement inchangé.
+    warmup_days: int = 0
 
 
 @dataclass
@@ -162,6 +211,30 @@ class ManualBrokerConfig:
     compte avant le premier cycle."""
 
     account_file: str = "state/manual_account.json"
+    # Sémantique "Stop Suiveur" natif du courtier (ex: Fortuneo) : l'écart
+    # est figé en % à l'entrée et c'est le COURTIER qui remonte le stop en
+    # continu. Le bot ne notifie alors qu'à la pose (entrée), à l'annulation
+    # (sortie/changement de quantité) et quand le stop a vraisemblablement
+    # été déclenché — jamais "remplace ton stop" à chaque cycle. Implique
+    # `risk.stop_mode: trailing_pct` (un stop "atr" est alors traité comme
+    # tel, écart = `atr_stop_multiple` x ATR / prix à l'entrée).
+    native_trailing_stop: bool = False
+    # Écart proposé pour un ordre à cours limité alternatif à l'ordre au
+    # marché (achat : dernier cours + écart ; vente : dernier cours - écart).
+    limit_offset_pct: float = 0.005
+
+
+@dataclass
+class AlertsConfig:
+    """Alertes d'INFORMATION (jamais des ordres), ex: mode buy & hold sans
+    stop : push quand `symbol` clôture sous sa SMA `sma_window`, ou quand
+    l'equity du compte passe sous `drawdown_pct` de son plus haut. Une seule
+    notification par franchissement (et une au retour), pas à chaque cycle."""
+
+    enabled: bool = False
+    symbol: str = "PSP5.PA"
+    sma_window: int = 200
+    drawdown_pct: float = 0.20
 
 
 @dataclass
@@ -214,6 +287,14 @@ class LiveConfig:
     # module pour cet avertissement.
     track_record_file: str = "state/symbol_track_record.json"
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    # Heure locale (fuseau du calendrier de marché, ex "18:30" à Paris pour
+    # XPAR) à partir de laquelle exécuter UN SEUL cycle par jour de bourse,
+    # après la clôture : signaux sur la clôture définitive du jour, ordres à
+    # passer le lendemain à l'ouverture (même convention que le backtest).
+    # Remplace alors `loop_interval_seconds`/`trade_only_when_market_open`.
+    # None (défaut) : boucle à intervalle fixe, inchangée.
+    daily_run_after: str | None = None
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
 
 
 @dataclass
@@ -295,6 +376,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     manual_raw = live_raw.pop("manual", None) or {}
     notifications_raw = live_raw.pop("notifications", None) or {}
     pushover_raw = notifications_raw.get("pushover", None) or {}
+    alerts_raw = live_raw.pop("alerts", None) or {}
 
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
@@ -311,6 +393,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             **live_raw,
             manual=ManualBrokerConfig(**manual_raw),
             notifications=NotificationsConfig(pushover=PushoverConfig(**pushover_raw)),
+            alerts=AlertsConfig(**alerts_raw),
         ),
         news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
         optimization=OptimizationConfig(**optimization_raw),

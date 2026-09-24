@@ -1,0 +1,95 @@
+# PEA Fortuneo — mode (b) : rotation mensuelle "dual momentum" entre ETF
+# éligibles PEA, sans API (broker "manual", ordres poussés via Pushover).
+#
+# Une fois par mois (décision sur la clôture de la 1re séance du mois, ordre
+# à passer le lendemain) : on garde l'ETF dont le rendement 12 mois est le
+# meilleur, s'il est positif ; sinon cash. Entre deux décisions : rien.
+# Voir README (section "PEA Fortuneo v2") pour le backtest à frais réels —
+# honnêtement, cette rotation NE bat PAS le buy & hold PSP5 sur 2018→2026.
+#
+# AVANT DE DÉMARRER : {"cash": 2306.59, "positions": {}} dans account_file.
+
+universe:
+  # Tickers yfinance vérifiés (historique disponible, voir README) ; la
+  # plupart remontent à 2014 ou avant, PAEEM seulement à 04/2019 (ignoré du
+  # classement tant que ses 12 mois de momentum ne sont pas calculables).
+  symbols:
+    - PSP5.PA # Amundi PEA S&P 500
+    - PUST.PA # Amundi PEA Nasdaq-100
+    - CAC.PA # Amundi CAC 40 UCITS ETF Dist
+    - ETZ.PA # BNP Paribas Easy Stoxx Europe 600
+    - PAEEM.PA # Amundi PEA Émergents MSCI EM ESG
+  timeframe: "1Day"
+
+strategies:
+  - name: dual_momentum
+    enabled: true
+    weight: 1.0
+    params:
+      lookback_window: 252 # ~12 mois
+      top_n: 1
+      absolute_filter: "momentum" # garde l'ETF seulement si son rendement 12 mois > 0
+      risk_off_symbol: null # pas d'actif "refuge" PEA satisfaisant : cash (voir README)
+
+risk:
+  allow_short: false
+  max_gross_exposure_pct: 1.0
+  max_position_weight_pct: 1.0
+  risk_per_trade_pct: 1.0 # neutralise le dimensionnement ATR : le poids vient de la stratégie
+  atr_stop_multiple: 6.0
+  atr_window: 14
+  max_open_positions: 2
+  max_daily_loss_pct: 1.0
+  max_drawdown_pct: 1.0
+  stop_mode: "none" # le filtre de momentum absolu fait office de sortie
+  trailing_stop_pct: null
+  stop_reentry: "sma"
+  stop_reentry_sma_window: 200
+
+market:
+  calendar: "XPAR"
+  close_buffer_minutes: 15
+  regime_filter:
+    enabled: false
+  volatility_filter:
+    enabled: false
+
+backtest:
+  start_date: "2018-01-01"
+  end_date: null
+  initial_cash: 2306.59
+  commission_pct: 0.005
+  commission_schedule:
+    tiers:
+      - {up_to: 500, pct: 0.005, min: 1.95}
+      - {up_to: 2000, fixed: 1.95}
+      - {up_to: null, pct: 0.002}
+  whole_shares: true
+  min_order_value: 150
+  max_fee_pct: 0.02
+  rebalance_tolerance_pct: 0.10
+  warmup_days: 400
+  data_source: "yfinance"
+
+live:
+  loop_interval_seconds: 3600
+  trade_only_when_market_open: false
+  daily_run_after: "18:30"
+  state_file: "state/live_state_pea_momentum.json"
+  broker: "manual"
+  manual:
+    account_file: "state/manual_account_pea_momentum.json"
+    native_trailing_stop: true
+    limit_offset_pct: 0.005
+  alerts:
+    enabled: false
+  notifications:
+    pushover:
+      enabled: true
+      title: "PEA momentum ETF"
+      priority: 0
+      alert_priority: 1
+
+optimization:
+  metric: sharpe_ratio
+  grids: {}

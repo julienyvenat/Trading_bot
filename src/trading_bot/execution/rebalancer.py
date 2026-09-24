@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from trading_bot.execution.broker_base import Broker
 from trading_bot.logger import get_logger
+from trading_bot.portfolio.fees import ExecutionRules, decide_order_qty
 from trading_bot.portfolio.risk import PositionSizing
 
 logger = get_logger()
@@ -64,6 +65,43 @@ def plan_orders(
         orders.append(PlannedOrder(symbol=symbol, side=side, qty=abs(delta_qty), notional_value=delta_value))
 
     return orders
+
+
+def apply_execution_rules(
+    orders: list[PlannedOrder],
+    current_positions: dict[str, float],
+    equity: float,
+    last_prices: dict[str, float],
+    cash: float,
+    rules: ExecutionRules,
+) -> list[PlannedOrder]:
+    """Applique aux ordres planifiés les mêmes contraintes que le backtest
+    (voir `trading_bot.portfolio.fees.decide_order_qty`) : ventes d'abord,
+    actions entières, achats plafonnés au cash (frais compris, uniquement si
+    `rules.whole_shares`, ex: PEA sans marge), ordres trop petits ou trop
+    chers en frais ignorés. Avec des règles par défaut, seul l'ordre change
+    (ventes avant achats), jamais les quantités."""
+    ordered = sorted(orders, key=lambda o: 0 if o.side == "sell" else 1)
+    cash_left = cash
+    result: list[PlannedOrder] = []
+    for order in ordered:
+        price = last_prices[order.symbol]
+        current = current_positions.get(order.symbol, 0.0)
+        target = current + (order.qty if order.side == "buy" else -order.qty)
+        new_qty, reason = decide_order_qty(
+            current, target, price, equity, cash_left if rules.whole_shares else None, rules
+        )
+        delta = new_qty - current
+        if reason:
+            logger.info("Ordre %s %s ignoré : %s.", order.side, order.symbol, reason)
+        if abs(delta) * price < MIN_ORDER_VALUE:
+            continue
+        fee = rules.commission.fee(delta * price)
+        cash_left -= delta * price + fee
+        result.append(
+            PlannedOrder(symbol=order.symbol, side="buy" if delta > 0 else "sell", qty=abs(delta), notional_value=abs(delta) * price)
+        )
+    return result
 
 
 def execute_orders(orders: list[PlannedOrder], broker: Broker, dry_run: bool = False) -> None:

@@ -1,0 +1,114 @@
+# PEA Fortuneo — mode (a) : BUY & HOLD PSP5 (Amundi PEA S&P 500), sans API.
+#
+# Le plus simple et, sur 2018→2026, le plus rentable en backtest à frais
+# réels (voir README, section "PEA Fortuneo v2") : tout le cash est investi
+# en actions ENTIÈRES de PSP5, puis on ne touche plus à rien. Aucun stop par
+# défaut : en backtest, aucun stop suiveur large (ATR x4/6/8 ou 15/20/25 %)
+# ne bat le buy & hold pur en Sharpe, et le seul qui réduit le drawdown sur
+# toute la période (20 %) le doit au seul krach de 2020, coûte ~3 pts de
+# CAGR et fait moins bien hors échantillon. À la place, alertes d'INFORMATION (pas d'ordre)
+# si PSP5 clôture sous sa SMA 200 ou si le compte perd plus de 20 % depuis
+# son plus haut.
+#
+# Broker "manual" (voir trading_bot.execution.manual_broker) : le bot n'envoie
+# JAMAIS d'ordre, il pousse (Pushover) l'ordre Fortuneo exact à passer.
+# AVANT DE DÉMARRER, crée `live.manual.account_file` avec le cash réel du PEA
+# (hors lignes que le bot ne gère pas, ex. des AXA détenues à côté) :
+#   {"cash": 2306.59, "positions": {}}
+#
+# Lancer :
+#   python -m trading_bot backtest --config config/config_pea_buyhold.yaml
+#   python -m trading_bot paper --config config/config_pea_buyhold.yaml --once   # un cycle, pour voir
+#   python -m trading_bot paper --config config/config_pea_buyhold.yaml          # boucle (1 cycle/jour après clôture)
+
+universe:
+  symbols:
+    - PSP5.PA # Amundi PEA S&P 500 UCITS ETF Acc
+  timeframe: "1Day"
+
+strategies:
+  - name: buy_and_hold
+    enabled: true
+    weight: 1.0
+    params: {}
+
+risk:
+  allow_short: false # PEA : pas de vente à découvert
+  max_gross_exposure_pct: 1.0
+  max_position_weight_pct: 1.0
+  # Dimensionnement ATR neutralisé (risk_per_trade élevé) : on veut 100 %
+  # investi, pas une taille "risque 1 %" pensée pour du trading actif.
+  risk_per_trade_pct: 1.0
+  atr_stop_multiple: 6.0 # utilisé seulement si stop_mode: trailing_pct sans trailing_stop_pct
+  atr_window: 14
+  max_open_positions: 1
+  # Coupe-circuits désactivés (1.0 = jamais) : un coupe-circuit de drawdown
+  # à 20 % vendrait tout au pire moment, à l'opposé du buy & hold.
+  max_daily_loss_pct: 1.0
+  max_drawdown_pct: 1.0
+  # "none" (défaut retenu, voir backtest) | "trailing_pct" (Stop Suiveur
+  # Fortuneo, écart fixe `trailing_stop_pct`, ex 0.20, ou atr_stop_multiple
+  # x ATR à l'entrée si null).
+  stop_mode: "none"
+  trailing_stop_pct: null
+  # Si un stop est activé : ne racheter qu'une fois PSP5 revenu au-dessus de
+  # sa SMA 200 (sinon on rachèterait le lendemain du stop).
+  stop_reentry: "sma"
+  stop_reentry_sma_window: 200
+
+market:
+  calendar: "XPAR"
+  close_buffer_minutes: 15
+  regime_filter:
+    enabled: false
+  volatility_filter:
+    enabled: false
+
+backtest:
+  start_date: "2018-01-01"
+  end_date: null
+  initial_cash: 2306.59
+  commission_pct: 0.005 # ignoré quand commission_schedule est renseigné
+  # Barème standard Fortuneo Bourse, Euronext (à revérifier sur la grille en
+  # vigueur). NB : promo jusqu'au 31/12/2026, frais d'achat remboursés sur
+  # une sélection d'ETF Amundi pour des ordres de 500 à 100 000 € — NON
+  # modélisée ici (prudence).
+  commission_schedule:
+    tiers:
+      - {up_to: 500, pct: 0.005, min: 1.95} # <= 500 € : 0,50 %, min 1,95 €
+      - {up_to: 2000, fixed: 1.95} # 500 à 2 000 € : 1,95 € fixe
+      - {up_to: null, pct: 0.002} # > 2 000 € : 0,20 %
+  whole_shares: true
+  min_order_value: 150 # sous 150 €, les frais (>= 1,95 €) dépassent 1,3 %
+  max_fee_pct: 0.02
+  rebalance_tolerance_pct: 0.10
+  warmup_days: 400
+  data_source: "yfinance"
+
+live:
+  loop_interval_seconds: 3600 # ignoré (daily_run_after)
+  trade_only_when_market_open: false
+  # Un seul cycle par jour de bourse, après la clôture d'Euronext (17h30) :
+  # l'ordre éventuel est à passer le lendemain matin, comme dans le backtest.
+  daily_run_after: "18:30"
+  state_file: "state/live_state_pea_buyhold.json"
+  broker: "manual"
+  manual:
+    account_file: "state/manual_account_pea_buyhold.json"
+    native_trailing_stop: true # si stop_mode passe à trailing_pct : Stop Suiveur Fortuneo, jamais re-notifié
+    limit_offset_pct: 0.005
+  alerts:
+    enabled: true
+    symbol: "PSP5.PA"
+    sma_window: 200
+    drawdown_pct: 0.20
+  notifications:
+    pushover:
+      enabled: true
+      title: "PEA buy & hold"
+      priority: 0
+      alert_priority: 1
+
+optimization:
+  metric: sharpe_ratio
+  grids: {}

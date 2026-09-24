@@ -248,10 +248,12 @@ def test_one_push_per_cycle_batches_orders_and_stops(fake_urlopen, manual_broker
     payload = fake_urlopen.calls[0]["payload"]
     assert payload["title"] == "Trading Bot PEA — 3 ordre(s) à passer"
     assert payload["message"].split("\n") == [
-        "ORDRE : ACHETER 8 TTE.PA (≈ 642.24 € au dernier cours de 80.28 €)",
-        "ORDRE : ACHETER 1 MC.PA (≈ 780.00 € au dernier cours de 780.00 €)",
+        "ORDRE : ACHETER 8 TTE — ordre au marché (ou à cours limité 80,68 €) · ≈ 642,24 € au cours de 80,28 €, "
+        "frais ≈ 0,00 €",
+        "ORDRE : ACHETER 1 MC — ordre au marché (ou à cours limité 783,90 €) · ≈ 780,00 € au cours de 780,00 €, "
+        "frais ≈ 0,00 €",
         "Annuler le stop précédent sur TTE.PA",
-        "STOP : VENDRE 8 TTE.PA si le cours atteint 76.42 €",
+        "STOP : Poser un ordre STOP : vendre 8 TTE, seuil de déclenchement 76,42 €",
     ]
 
     # Instructions vidées après envoi : le cycle suivant sans ordre n'envoie rien.

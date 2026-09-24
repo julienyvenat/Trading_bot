@@ -66,3 +66,21 @@ def test_fetch_data_dispatches_to_alpaca(monkeypatch):
 def test_fetch_data_rejects_unknown_data_source():
     with pytest.raises(ValueError):
         cli._fetch_data(_make_config("not_a_real_source"), ["TSLA"])
+
+
+def test_fetch_data_downloads_warmup_before_start_date(monkeypatch):
+    called = {}
+
+    def _fake_fetch(symbols, start_date, end_date, interval):
+        called["start_date"] = start_date
+        return {}
+
+    monkeypatch.setattr("trading_bot.data.historical.fetch_historical_data", _fake_fetch)
+    config = _make_config("yfinance", timeframe="1Day")
+    config.backtest.warmup_days = 400
+    cli._fetch_data(config, ["TSLA"])
+    assert called["start_date"] == "2022-11-27"
+
+    config.backtest.warmup_days = 0
+    cli._fetch_data(config, ["TSLA"])
+    assert called["start_date"] == "2024-01-01"

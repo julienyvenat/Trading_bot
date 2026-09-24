@@ -37,14 +37,23 @@ def _fetch_data(config: AppConfig, symbols: list[str]) -> dict:
 
     Source pilotée par `backtest.data_source` (voir `BacktestConfig`) :
     "yfinance" (défaut) ou "alpaca" pour un historique intraday plus profond
-    que la limite de yfinance."""
+    que la limite de yfinance.
+
+    `backtest.warmup_days` > 0 : télécharge aussi ce nombre de jours AVANT
+    `start_date` pour chauffer les indicateurs (le moteur de backtest ne
+    simule de toute façon qu'à partir de `start_date`)."""
+    start_date = config.backtest.start_date
+    if config.backtest.warmup_days > 0:
+        import pandas as pd
+
+        start_date = (pd.Timestamp(start_date) - pd.Timedelta(days=config.backtest.warmup_days)).strftime("%Y-%m-%d")
     if config.backtest.data_source == "alpaca":
         from trading_bot.config import load_alpaca_credentials
         from trading_bot.data.market_data import fetch_historical_bars
 
         return fetch_historical_bars(
             symbols,
-            start_date=config.backtest.start_date,
+            start_date=start_date,
             end_date=config.backtest.end_date,
             timeframe=config.timeframe,
             credentials=load_alpaca_credentials(),
@@ -59,7 +68,7 @@ def _fetch_data(config: AppConfig, symbols: list[str]) -> dict:
 
     interval = yfinance_interval_for_timeframe(config.timeframe)
     return fetch_historical_data(
-        symbols, start_date=config.backtest.start_date, end_date=config.backtest.end_date, interval=interval
+        symbols, start_date=start_date, end_date=config.backtest.end_date, interval=interval
     )
 
 
@@ -151,6 +160,9 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print("\n=== Résultats du backtest ===")
     print(result.metrics.summary())
     print(f"Sorties sur stop suiveur : {result.num_stop_exits}")
+    years = max(result.metrics.num_trading_days / 252, 1e-9)
+    print(f"Ordres exécutés         : {result.num_orders} ({result.num_orders / years:.1f}/an)")
+    print(f"Frais payés (total)     : {result.total_fees:.2f}")
     if result.final_risk_state and result.final_risk_state.drawdown_halted:
         print(
             "⚠️  Coupe-circuit de DRAWDOWN déclenché à un moment du backtest "

@@ -68,3 +68,62 @@ def is_triggered(stop: StopLevel | None, low: float, high: float) -> bool:
     if stop.direction > 0:
         return low <= stop.stop_price
     return high >= stop.stop_price
+
+
+# --- Stop suiveur en % (sémantique "Stop Suiveur" natif de courtier) --------
+#
+# Contrairement au stop ATR ci-dessus (recalculé à chaque pas de temps à
+# partir de l'ATR courant), un ordre "Stop Suiveur" natif (ex: Fortuneo) est
+# défini une fois pour toutes à la pose par un ÉCART (ici en % du cours) :
+# c'est ensuite le courtier qui remonte le seuil en continu, à
+# `plus haut atteint depuis la pose x (1 - écart)`. Modélisé à l'identique
+# côté backtest et live pour ne jamais notifier "remplace ton stop" à chaque
+# cycle alors que le courtier le fait déjà tout seul.
+
+STOP_MODES = ("atr", "trailing_pct", "none")
+
+
+@dataclass(frozen=True)
+class PctTrailingStop:
+    trail_pct: float  # écart figé à l'entrée, ex 0.125 = 12,5 %
+    high_water: float  # plus haut atteint depuis la pose
+
+    @property
+    def stop_price(self) -> float:
+        return self.high_water * (1.0 - self.trail_pct)
+
+    def ratchet(self, high: float) -> PctTrailingStop:
+        """Remonte le plus haut de référence (jamais à la baisse)."""
+        if high is None or high <= self.high_water:
+            return self
+        return PctTrailingStop(trail_pct=self.trail_pct, high_water=float(high))
+
+
+def validate_stop_mode(mode: str) -> str:
+    if mode not in STOP_MODES:
+        raise ValueError(f"`risk.stop_mode` inconnu '{mode}'. Valeurs supportées : {', '.join(STOP_MODES)}.")
+    return mode
+
+
+def entry_trail_pct(
+    fixed_pct: float | None, price: float, atr_value: float | None, atr_stop_multiple: float
+) -> float | None:
+    """Écart (en %) à figer à l'entrée : `fixed_pct` s'il est fourni, sinon
+    `atr_stop_multiple` x ATR / prix (converti une seule fois, à l'entrée).
+    None si aucun des deux n'est calculable (ATR en warmup)."""
+    if fixed_pct is not None:
+        if not 0 < fixed_pct < 1:
+            raise ValueError(f"`risk.trailing_stop_pct` doit être dans ]0, 1[ (reçu {fixed_pct}).")
+        return float(fixed_pct)
+    if atr_value is None or atr_value <= 0 or price <= 0:
+        return None
+    return min(0.95, atr_stop_multiple * atr_value / price)
+
+
+def pct_stop_exit_price(stop: PctTrailingStop, open_price: float) -> float:
+    """Prix d'exécution réaliste d'un stop déclenché : au seuil, ou à
+    l'ouverture si le cours a ouvert en gap SOUS le seuil (le stop devient
+    alors un ordre au marché exécuté au premier cours disponible)."""
+    if open_price is not None and open_price > 0:
+        return min(stop.stop_price, open_price)
+    return stop.stop_price
