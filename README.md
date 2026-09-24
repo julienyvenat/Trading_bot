@@ -549,10 +549,15 @@ vérifie-la sur la fiche Fortuneo avant d'acheter.
   On ne vend les poches en excès que si la dérive dépasse encore le seuil
   après ces achats.
 - Actions entières, frais Fortuneo, `min_order_value: 150` et
-  `max_fee_pct: 0.02`. Un ordre qui ne vaut pas ses frais est écarté : son
-  montant va aux autres poches, ou attend l'apport suivant. Conséquence
-  assumée : sur ~2 300 €, une dérive corrigeable seulement par une vente de
-  moins de 150 € n'est pas corrigée, le prochain apport s'en charge.
+  `max_fee_pct: 0.02`. Une poche n'est **jamais achetée au-delà de son écart
+  à la cible** (+ 1 action d'arrondi), ni si elle est déjà à sa cible. Parmi
+  toutes les combinaisons d'achats finançables qui respectent ces règles, le
+  bot retient celle qui laisse la plus petite dérive max, puis le plus petit
+  écart total. Un plan qui ne réduit pas la dérive n'est jamais proposé.
+  Si aucun achat valable n'existe (poches en retard de moins de 150 €), le
+  cash attend : un push « cash en attente » l'annonce, une fois par montant.
+  Même logique pour les ventes : sur ~2 300 €, une dérive corrigeable
+  seulement par une vente de moins de 150 € attend le prochain apport.
 - Pas de stop (`risk.stop_mode: none`, imposé dans ce mode). Pas de
   coupe-circuit.
 
@@ -578,18 +583,31 @@ Premier push réel (`paper --once`, cours du 24/09/2026, 2 306,59 € de cash) :
 
 ```
 PEA cœur-satellite — 3 ordre(s) à passer
-INFO : Plan cœur-satellite : 2 283,52 € de cash à investir (seuil 200,00 €), vers les poches en retard, par les achats seulement, aucune vente.
-INFO : Poids : DCAM 0,0 % → 54,7 % (cible 55,0 %) · PSP5 0,0 % → 18,0 % (cible 20,0 %) · CL2 0,0 % → 25,4 % (cible 25,0 %) · cash 2 306,59 € → 42,46 €
-ORDRE : ACHETER 202 DCAM — ordre au marché (ou à cours limité 6,26 €) · ≈ 1 259,07 € au cours de 6,23 €, frais ≈ 1,95 €
-ORDRE : ACHETER 7 PSP5 — ordre au marché (ou à cours limité 59,61 €) · ≈ 415,17 € au cours de 59,31 €, frais ≈ 2,08 €
-ORDRE : ACHETER 18 CL2 — ordre au marché (ou à cours limité 32,60 €) · ≈ 583,92 € au cours de 32,44 €, frais ≈ 1,95 €
+INFO : Plan cœur-satellite : apport — 2 283,52 € de cash à investir (seuil 200,00 €), vers les poches en retard, par les achats seulement, aucune vente.
+INFO : Poids : DCAM 0,0 % → 54,2 % (cible 55,0 %) · PSP5 0,0 % → 20,6 % (cible 20,0 %) · CL2 0,0 % → 24,0 % (cible 25,0 %) · cash 2 306,59 € → 27,76 €
+ORDRE : ACHETER 200 DCAM — ordre au marché (ou à cours limité 6,26 €) · ≈ 1 246,60 € au cours de 6,23 €, frais ≈ 1,95 €
+ORDRE : ACHETER 8 PSP5 — ordre au marché (ou à cours limité 59,61 €) · ≈ 474,48 € au cours de 59,31 €, frais ≈ 2,37 €
+ORDRE : ACHETER 17 CL2 — ordre au marché (ou à cours limité 32,60 €) · ≈ 551,48 € au cours de 32,44 €, frais ≈ 1,95 €
 INFO : Pas de stop à poser (DCAM, PSP5, CL2) : risk.stop_mode vaut none dans cette config. Des alertes d'information préviennent en cas de forte baisse, sans jamais vendre.
 ```
 
-(PSP5 à 18 % : une part vaut 2,6 % du portefeuille, 8 parts ne passaient pas
-avec le coussin de cash.) Avec 20 000 € : 1 745 DCAM, 66 PSP5, 153 CL2
-(54,5 / 19,6 / 24,9 %), 39,51 € de frais, 206 € laissés en coussin. Le cycle
+Dérive max après achat : 1,0 pt. Une part de PSP5 vaut 2,6 % du
+portefeuille, d'où l'arrondi. Avec 20 000 € : 1 748 DCAM, 66 PSP5, 152 CL2
+(54,6 / 19,6 / 24,7 %), 39,48 € de frais, 220 € laissés en coussin. Le cycle
 suivant, sans changement, n'envoie rien.
+
+Apport de 300 € le lendemain (ajouté au cash du fichier de compte) :
+
+```
+PEA cœur-satellite — 1 ordre(s) à passer
+INFO : Apport détecté : +300,00 €. Plan cœur-satellite : apport — 317,76 € de cash à investir (seuil 200,00 €), vers les poches en retard, par les achats seulement, aucune vente.
+INFO : Poids : DCAM 47,9 % → 54,9 % (cible 55,0 %) · PSP5 18,2 % → 18,3 % (cible 20,0 %) · CL2 21,2 % → 21,2 % (cible 25,0 %) · cash 327,76 € → 145,05 €
+ORDRE : ACHETER 29 DCAM — ordre au marché (ou à cours limité 6,26 €) · ≈ 180,76 € au cours de 6,23 €, frais ≈ 1,95 €
+```
+
+PSP5 et CL2 sont en retard de moins de 150 € : un ordre n'y vaudrait pas ses
+frais. Les 145 € restants attendent l'apport suivant (dérive max 3,8 pts,
+dans la bande).
 
 **Alertes d'information** (`live.alerts`, jamais d'ordre, une seule fois par
 palier, réarmées quand la baisse repasse sous la moitié du palier) :
@@ -612,9 +630,9 @@ un jour sans volume) ont été retirées. Pire creux : février-mars 2020.
 
 | Variante | CAGR | Max DD | Sharpe | Pire 12 mois | Récup. | Ordres/an | Frais |
 |---|---|---|---|---|---|---|---|
-| **Plan 55/20/25** | +16,6 % | -41,0 % | 0,88 | -21,1 % | 0,9 an | 1,8 | 43 € |
-| 0 % levier (73/27) | +13,2 % | -33,6 % | 0,88 | -17,2 % | 0,9 an | 0,5 | 12 € |
-| 50 % levier (37/13/50) | +20,0 % | -47,6 % | 0,87 | -25,4 % | 0,9 an | 2,7 | 66 € |
+| **Plan 55/20/25** | +16,6 % | -40,8 % | 0,88 | -20,9 % | 0,9 an | 1,9 | 46 € |
+| 0 % levier (73/27) | +13,2 % | -33,6 % | 0,88 | -17,3 % | 0,9 an | 0,5 | 12 € |
+| 50 % levier (37/13/50) | +20,0 % | -47,6 % | 0,87 | -25,3 % | 0,9 an | 2,8 | 69 € |
 | 100 % PSP5 | +15,4 % | -33,7 % | 0,93 | -14,8 % | 0,9 an | 0,1 | 5 € |
 | 100 % World | +12,4 % | -33,6 % | 0,84 | -18,2 % | 0,9 an | 0,1 | 5 € |
 
@@ -622,16 +640,16 @@ un jour sans volume) ont été retirées. Pire creux : février-mars 2020.
 
 | Variante | CAGR | TRI | Versé → final | Max DD | Ordres/an | Frais |
 |---|---|---|---|---|---|---|
-| **Plan 55/20/25** | +16,8 % | +16,8 % | 34 800 → 180 456 € | -40,7 % | 4,9 | 222 € |
-| 0 % levier | +13,1 % | +13,1 % | 34 800 → 126 650 € | -33,5 % | 2,8 | 106 € |
-| 50 % levier | +20,1 % | +20,0 % | 34 800 → 246 183 € | -47,8 % | 5,3 | 330 € |
+| **Plan 55/20/25** | +16,8 % | +16,8 % | 34 800 → 180 213 € | -40,7 % | 5,2 | 227 € |
+| 0 % levier | +13,1 % | +13,1 % | 34 800 → 126 424 € | -33,5 % | 3,2 | 114 € |
+| 50 % levier | +20,1 % | +20,0 % | 34 800 → 246 181 € | -47,8 % | 5,1 | 325 € |
 | 100 % PSP5 | +15,3 % | +15,2 % | 34 800 → 155 470 € | -33,5 % | 2,4 | 97 € |
 | 100 % World | +12,3 % | +12,4 % | 34 800 → 117 644 € | -33,5 % | 2,8 | 106 € |
 
-Avec 2 306,59 € + 100 €/mois : plan 17 107 → 58 358 € (TRI +16,3 %),
-100 % PSP5 52 140 €, 100 % World 42 937 €, ~5-6 ordres/an. Sur DCAM réel
-seul (03/2025 → 09/2026, 1,5 an, trop court pour conclure) : plan +17,7 %/an,
-DD -20,3 % ; PSP5 +15,2 %, DD -17,0 %.
+Avec 2 306,59 € + 100 €/mois : plan 17 107 → 58 593 € (TRI +16,4 %),
+100 % PSP5 52 140 €, 100 % World 42 937 €, ~5-7 ordres/an. Sur DCAM réel
+seul (03/2025 → 09/2026, 1,5 an, trop court pour conclure) : plan +17,8 %/an,
+DD -20,5 % ; PSP5 +15,2 %, DD -17,0 %.
 
 *(b) Stress test synthétique, 2 306,59 € + 100 €/mois, 1990 → 2026
 (46 307 € versés).* Pire creux : oct. 2007 → mars 2009 pour toutes les
@@ -639,9 +657,9 @@ variantes.
 
 | Variante | CAGR | TRI | Versé → final | Max DD | Sharpe | Pire 12 mois | Récup. | Ordres/an | Frais |
 |---|---|---|---|---|---|---|---|---|---|
-| **Plan 55/20/25** | +10,9 % | +11,4 % | 46 307 → 689 514 € | -65,1 % | 0,63 | -57,3 % | 5,4 ans | 4,8 | 760 € |
-| 0 % levier | +8,9 % | +9,4 % | 46 307 → 410 755 € | -57,0 % | 0,63 | -49,6 % | 5,4 ans | 3,4 | 258 € |
-| 50 % levier | +12,5 % | +13,0 % | 46 307 → 1 063 251 € | -72,8 % | 0,60 | -65,0 % | 5,6 ans | 5,5 | 1 471 € |
+| **Plan 55/20/25** | +10,9 % | +11,4 % | 46 307 → 689 600 € | -65,1 % | 0,63 | -57,3 % | 5,4 ans | 5,1 | 762 € |
+| 0 % levier | +8,9 % | +9,4 % | 46 307 → 409 971 € | -56,9 % | 0,63 | -49,6 % | 5,4 ans | 3,5 | 262 € |
+| 50 % levier | +12,6 % | +13,0 % | 46 307 → 1 065 519 € | -72,8 % | 0,60 | -65,1 % | 5,6 ans | 5,6 | 1 450 € |
 | 100 % PSP5 | +10,6 % | +10,7 % | 46 307 → 582 903 € | -55,1 % | 0,65 | -47,3 % | 4,9 ans | 3,0 | 224 € |
 | 100 % World | +8,2 % | +8,9 % | 46 307 → 360 398 € | -57,7 % | 0,58 | -50,4 % | 5,5 ans | 3,0 | 221 € |
 
@@ -649,9 +667,9 @@ variantes.
 
 | Variante | 2000 → 2012 | 2007 → 2009 |
 |---|---|---|
-| **Plan 55/20/25** | +0,7 % / -65,5 % / -57,8 % — creux non récupéré fin 2012 | -8,8 % / -65,6 % / -57,9 % |
+| **Plan 55/20/25** | +0,8 % / -65,6 % / -57,9 % — creux non récupéré fin 2012 | -8,9 % / -65,6 % / -57,9 % |
 | 0 % levier | +1,6 % / -57,0 % / -49,7 % | -5,8 % / -57,1 % / -49,7 % |
-| 50 % levier | -0,5 % / -73,3 % / -65,7 % | -12,5 % / -73,0 % / -65,3 % |
+| 50 % levier | -0,5 % / -73,3 % / -65,7 % | -12,3 % / -72,8 % / -65,1 % |
 | 100 % PSP5 | +1,6 % / -55,2 % / -47,5 % — récupéré en 4,9 ans | -5,8 % / -55,2 % / -47,5 % |
 | 100 % World | +1,6 % / -57,9 % / -50,5 % | -5,9 % / -57,8 % / -50,5 % |
 
@@ -674,7 +692,7 @@ entières. Calendrier NYSE, **USD, change ignoré**.
   CL2 ajoute du risque au moins autant que du rendement. En cause, la
   réinitialisation quotidienne (perte à la volatilité) et le coût d'emprunt
   (taux court + 0,6 %).
-- Sur 2000-2012, **le plan est le pire des variantes sans levier** (+0,7 %/an
+- Sur 2000-2012, **le plan est le pire des variantes sans levier** (+0,8 %/an
   contre +1,6 %) et son creux de 2007-2009 n'est toujours pas récupéré fin
   2012. À 50 % de levier, on perd de l'argent sur 13 ans.
 - En 2007-2009, attends-toi à voir le portefeuille divisé par ~3 (-65 %) et

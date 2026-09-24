@@ -26,17 +26,21 @@ engine`, broker manuel) — `plan_rebalance` est une fonction pure :
 
 Contraintes d'exécution (`trading_bot.portfolio.fees`) : actions entières,
 achats plafonnés au cash frais compris, ordres sous `min_order_value` ou
-dont les frais dépassent `max_fee_pct` écartés (le cash correspondant est
-reporté sur les autres poches, ou attend le prochain apport).
+dont les frais dépassent `max_fee_pct` écartés. Une poche n'est jamais
+achetée au-delà de son écart à la cible (+ 1 action d'arrondi), ni si elle
+est déjà à sa cible ; parmi les combinaisons d'achats finançables, on
+retient celle qui colle le mieux aux cibles (voir `allocate_cash`). Un plan
+qui ne réduit pas la dérive n'est jamais émis : le cash attend alors le
+prochain apport (raison "waiting").
 """
 
 from __future__ import annotations
 
-import itertools
 import math
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from trading_bot.execution.rebalancer import PlannedOrder
@@ -111,8 +115,10 @@ def core_satellite_params(config) -> CoreSatelliteParams | None:
 @dataclass
 class RebalancePlan:
     orders: list[PlannedOrder] = field(default_factory=list)
-    # "contribution" (cash investi, achats seuls), "drift" (dérive > seuil),
-    # "calendar" (rééquilibrage annuel) ; None si rien à faire.
+    # "contribution" (apport : cash investi, achats seuls), "drift" (dérive
+    # des poches > seuil), "calendar" (rééquilibrage annuel), "waiting" (cash
+    # à investir mais aucun achat possible ne rapproche des cibles : il
+    # attend le prochain apport) ; None si rien à faire.
     reason: str | None = None
     sells: bool = False
     weights_before: dict[str, float] = field(default_factory=dict)
@@ -121,6 +127,8 @@ class RebalancePlan:
     cash_after: float = 0.0
     fees: float = 0.0
     max_drift_before_pts: float = 0.0
+    max_drift_after_pts: float = 0.0
+    waiting_cash: float = 0.0
 
 
 def weights_of(values: dict[str, float], cash: float) -> dict[str, float]:
@@ -161,87 +169,97 @@ def _order_ok(notional: float, rules: ExecutionRules) -> bool:
     return True
 
 
+# Taille max de la recherche exhaustive des combinaisons d'achats en actions
+# entières ; au-delà (gros montants), recherche locale de ±LOCAL_RADIUS
+# actions par poche autour du remplissage par niveau.
+EXHAUSTIVE_MAX_COMBOS = 60_000
+LOCAL_RADIUS = 12
+
+
+def _candidates(
+    gap: float, center: int, price: float, cash: float, rules: ExecutionRules, radius: int | None
+) -> list[int]:
+    """Quantités envisageables pour une poche : 0, ou de la plus petite
+    quantité qui vaut ses frais jusqu'à l'écart à la cible + 1 action (jamais
+    au-delà), dans la limite du cash."""
+    if gap <= 0 or price <= 0:
+        return [0]
+    cap = min(int(math.floor(gap / price)) + 1, int(max_affordable_qty(cash, price, rules.commission, True)))
+    low = max(1, int(math.ceil(rules.min_order_value / price)) if rules.min_order_value > 0 else 1)
+    while low <= cap and not _order_ok(low * price, rules):
+        low += 1
+    if low > cap:
+        return [0]
+    if radius is not None:
+        base = max(center, low)
+        low, cap = max(low, base - radius), min(cap, base + radius)
+    return [0, *range(low, cap + 1)]
+
+
 def allocate_cash(
     values: dict[str, float],
     prices: dict[str, float],
     targets: dict[str, float],
     cash: float,
     rules: ExecutionRules,
+    cash_total: float | None = None,
 ) -> dict[str, float]:
     """Quantités à ACHETER par poche pour investir au mieux `cash` (frais
-    compris) dans les poches en retard. Une poche dont l'achat serait trop
-    petit (min_order_value / max_fee_pct) est écartée et son montant reporté
-    sur les autres ; le reliquat d'arrondi (actions entières) complète, une
-    action à la fois, la poche la plus en retard déjà achetée."""
-    eligible = {s: t for s, t in targets.items() if t > 0 and prices.get(s, 0) > 0}
-    buys: dict[str, float] = {}
-    while eligible:
-        amounts = _fill_level(values, eligible, cash)
-        buys = {}
-        rejected = None
-        for symbol, amount in sorted(amounts.items(), key=lambda kv: -kv[1]):
-            if amount <= 0:
-                continue
-            qty = max_affordable_qty(amount, prices[symbol], rules.commission, rules.whole_shares)
-            if qty <= 0 or not _order_ok(qty * prices[symbol], rules):
-                rejected = symbol if rejected is None or amount < amounts[rejected] else rejected
-                continue
-            buys[symbol] = qty
-        if rejected is None:
-            break
-        # On écarte la plus petite poche refusée et on recalcule : son montant
-        # revient aux autres (sinon ce cash dormirait jusqu'au prochain apport).
-        eligible.pop(rejected)
-    if not eligible:
+    compris) sans jamais dépasser la cible d'une poche de plus d'une action
+    ni acheter une poche déjà à sa cible (cible = poids x (valeur investie +
+    `cash`)). `cash_total` : cash réellement détenu (>= `cash`, coussin
+    compris), pour mesurer les poids après achat.
+
+    Actions entières : parmi les combinaisons finançables qui respectent les
+    garde-fous (min_order_value, max_fee_pct), on retient celle qui minimise
+    la dérive max après achat (poids cash compris), puis la somme des écarts
+    au carré, puis le cash laissé. « Ne rien acheter » fait partie des
+    candidates : si aucun achat ne rapproche des cibles, le cash attend."""
+    cash_total = cash if cash_total is None else cash_total
+    investable = sum(values.values()) + cash
+    gaps = {s: t * investable - values.get(s, 0.0) for s, t in targets.items()}
+    eligible = [s for s, t in targets.items() if t > 0 and prices.get(s, 0) > 0 and gaps[s] > 0]
+    if cash <= 0 or not eligible:
         return {}
+    ideal = _fill_level({s: values.get(s, 0.0) for s in eligible}, {s: targets[s] for s in eligible}, cash)
+    ideal = {s: min(a, gaps[s]) for s, a in ideal.items()}
 
-    def spent(b: dict[str, float]) -> float:
-        return sum(q * prices[s] + rules.commission.fee(q * prices[s]) for s, q in b.items())
+    if not rules.whole_shares:
+        buys = {}
+        for s, amount in ideal.items():
+            qty = max_affordable_qty(amount, prices[s], rules.commission, False)
+            if qty > 0 and _order_ok(qty * prices[s], rules):
+                buys[s] = qty
+        return buys
 
-    step = 1.0 if rules.whole_shares else 0.0
-    if step:
-        while True:
-            left = cash - spent(buys)
-            candidates = []
-            for symbol, qty in buys.items():
-                price = prices[symbol]
-                extra = (qty + 1) * price + rules.commission.fee((qty + 1) * price) - (
-                    qty * price + rules.commission.fee(qty * price)
-                )
-                if extra <= left + 1e-9:
-                    fill = (values.get(symbol, 0.0) + qty * price) / targets[symbol]
-                    candidates.append((fill, symbol))
-            if not candidates:
-                break
-            _, symbol = min(candidates)
-            buys[symbol] += 1
-        buys = _refine_whole_shares(values, prices, targets, cash, rules, buys, spent)
-    return buys
-
-
-def _refine_whole_shares(values, prices, targets, cash, rules, buys, spent) -> dict[str, float]:
-    """Recherche locale autour de la solution arrondie : quelques actions de
-    plus ou de moins par poche, pour la combinaison finançable (frais
-    compris, garde-fous respectés) qui colle le mieux aux cibles (somme des
-    écarts au carré), puis celle qui laisse le moins de cash dormir."""
-    symbols = list(buys)
-    total = sum(values.values()) + cash
-    best_key, best = None, buys
-    ranges = [range(max(0, int(buys[s]) - 3), int(buys[s]) + 2) for s in symbols]
-    for combo in itertools.product(*ranges):
-        candidate = {s: float(q) for s, q in zip(symbols, combo) if q > 0}
-        if any(not _order_ok(q * prices[s], rules) for s, q in candidate.items()):
-            continue
-        cost = spent(candidate)
-        if cost > cash + 1e-9:
-            continue
-        deviation = sum(
-            (values.get(s, 0.0) + candidate.get(s, 0.0) * prices[s] - t * total) ** 2 for s, t in targets.items()
-        )
-        key = (round(deviation, 6), round(cash - cost, 6))
-        if best_key is None or key < best_key:
-            best_key, best = key, candidate
-    return best
+    centers = {s: int(math.floor(ideal.get(s, 0.0) / prices[s])) for s in eligible}
+    cands = [_candidates(gaps[s], centers[s], prices[s], cash, rules, None) for s in eligible]
+    if math.prod(len(c) for c in cands) > EXHAUSTIVE_MAX_COMBOS:
+        cands = [_candidates(gaps[s], centers[s], prices[s], cash, rules, LOCAL_RADIUS) for s in eligible]
+    grids = np.meshgrid(*[np.array(c, dtype=float) for c in cands], indexing="ij")
+    qty = [g.ravel() for g in grids]
+    cost = np.zeros_like(qty[0])
+    fees = np.zeros_like(qty[0])
+    for s, c, q in zip(eligible, cands, qty):
+        fee_of = {n: rules.commission.fee(n * prices[s]) for n in c}
+        f = np.vectorize(fee_of.get)(q) if len(c) > 1 else np.zeros_like(q)
+        fees += f
+        cost += q * prices[s] + f
+    equity_after = sum(values.values()) + cash_total - fees
+    drift = np.zeros_like(cost)
+    sq = np.zeros_like(cost)
+    added = dict(zip(eligible, qty))
+    for s, t in targets.items():
+        value = values.get(s, 0.0) + (added[s] * prices[s] if s in added else 0.0)
+        drift = np.maximum(drift, np.abs(value / equity_after - t))
+        sq += (value - t * equity_after) ** 2
+    feasible = cost <= cash + 1e-9
+    if not feasible.any():
+        return {}
+    idx = np.flatnonzero(feasible)
+    order = np.lexsort((cash - cost[idx], np.round(sq[idx], 4), np.round(drift[idx], 9)))
+    best = idx[order[0]]
+    return {s: float(q[best]) for s, q in zip(eligible, qty) if q[best] > 0}
 
 
 def _sell_down(
@@ -261,6 +279,21 @@ def _sell_down(
     return sells
 
 
+def _apply(values, cash, prices, rules, sells, buys):
+    new_values = dict(values)
+    new_cash = cash
+    fees = 0.0
+    for side, book in (("sell", sells), ("buy", buys)):
+        for symbol, q in book.items():
+            notional = q * prices[symbol]
+            fee = rules.commission.fee(notional)
+            fees += fee
+            sign = 1 if side == "buy" else -1
+            new_values[symbol] += sign * notional
+            new_cash -= sign * notional + fee
+    return new_values, new_cash, fees
+
+
 def plan_rebalance(
     qty: dict[str, float],
     prices: dict[str, float],
@@ -270,7 +303,9 @@ def plan_rebalance(
     calendar_due: bool = False,
 ) -> RebalancePlan:
     """Ordres à passer (ventes d'abord) pour ce cycle, voir la docstring du
-    module. Aucune donnée n'est modifiée."""
+    module. Aucune donnée n'est modifiée. Garantie : la dérive max après
+    ordres (poids cash compris) n'est jamais pire qu'avant ; sinon aucun
+    ordre."""
     targets = params.targets
     values = {s: qty.get(s, 0.0) * prices[s] for s in targets}
     equity = cash + sum(values.values())
@@ -278,60 +313,62 @@ def plan_rebalance(
     plan = RebalancePlan(weights_before=weights, weights_after=weights, cash_before=cash, cash_after=cash)
     if equity <= 0:
         return plan
-    plan.max_drift_before_pts = drift = max_drift_pts(weights, targets)
+    plan.max_drift_before_pts = plan.max_drift_after_pts = drift = max_drift_pts(weights, targets)
     deployable = max(0.0, cash - params.cash_buffer(cash))
     drift_due = drift > params.drift_threshold_pts + 1e-9
     contribution_due = deployable >= params.contribution_threshold(equity) - 1e-9
     if not (drift_due or calendar_due or contribution_due):
         return plan
 
-    def finish(sells: dict[str, float], buys: dict[str, float], reason: str) -> RebalancePlan:
-        new_values = dict(values)
-        new_cash = cash
-        orders: list[PlannedOrder] = []
-        fees = 0.0
-        for side, book in (("sell", sells), ("buy", buys)):
-            for symbol in targets:
-                q = book.get(symbol, 0.0)
-                if q <= 0:
-                    continue
-                notional = q * prices[symbol]
-                fee = rules.commission.fee(notional)
-                fees += fee
-                sign = 1 if side == "buy" else -1
-                new_values[symbol] += sign * notional
-                new_cash -= sign * notional + fee
-                orders.append(PlannedOrder(symbol=symbol, side=side, qty=q, notional_value=notional))
-        plan.orders = orders
-        plan.reason = reason if orders else None
-        plan.sells = bool(sells)
-        plan.weights_after = weights_of(new_values, new_cash)
-        plan.cash_after = new_cash
-        plan.fees = fees
-        return plan
+    def outcome(sells, buys):
+        new_values, new_cash, fees = _apply(values, cash, prices, rules, sells, buys)
+        return max_drift_pts(weights_of(new_values, new_cash), targets), new_values, new_cash, fees
 
     # 1) Achats seuls avec le cash disponible.
-    buys = allocate_cash(values, prices, targets, deployable, rules)
-    after = {s: values[s] + buys.get(s, 0.0) * prices[s] for s in targets}
-    cash_left = cash - sum(q * prices[s] + rules.commission.fee(q * prices[s]) for s, q in buys.items())
-    residual = max_drift_pts(weights_of(after, cash_left), targets)
-    if drift_due:
-        band = params.drift_threshold_pts
-    elif calendar_due:
-        band = params.calendar_min_drift_pts
-    else:
-        band = math.inf
-    if residual <= band + 1e-9:
-        reason = "drift" if drift_due and not contribution_due else ("contribution" if buys else "calendar")
-        return finish({}, buys, reason)
+    buys = allocate_cash(values, prices, targets, deployable, rules, cash_total=cash)
+    sells: dict[str, float] = {}
+    residual, new_values, new_cash, fees = outcome({}, buys)
+    band = (
+        params.drift_threshold_pts if drift_due else (params.calendar_min_drift_pts if calendar_due else math.inf)
+    )
+    # 2) La dérive persiste : ventes des poches en excès, puis achats. Retenu
+    # seulement si le résultat est meilleur que les achats seuls.
+    if residual > band + 1e-9:
+        sell_q = _sell_down(values, prices, targets, equity - params.cash_buffer(cash), rules)
+        if sell_q:
+            post_values = {s: values[s] - sell_q.get(s, 0.0) * prices[s] for s in targets}
+            proceeds = sum(q * prices[s] - rules.commission.fee(q * prices[s]) for s, q in sell_q.items())
+            buys2 = allocate_cash(post_values, prices, targets, deployable + proceeds, rules, cash_total=cash + proceeds)
+            candidate = outcome(sell_q, buys2)
+            if candidate[0] < residual - 1e-9:
+                sells, buys = sell_q, buys2
+                residual, new_values, new_cash, fees = candidate
 
-    # 2) La dérive persiste : ventes des poches en excès, puis achats.
-    investable = equity - params.cash_buffer(cash)
-    sells = _sell_down(values, prices, targets, investable, rules)
-    post_values = {s: values[s] - sells.get(s, 0.0) * prices[s] for s in targets}
-    proceeds = sum(q * prices[s] - rules.commission.fee(q * prices[s]) for s, q in sells.items())
-    buys = allocate_cash(post_values, prices, targets, deployable + proceeds, rules)
-    return finish(sells, buys, "drift" if drift_due else "calendar")
+    if (not sells and not buys) or residual > drift + 1e-9:
+        # Rien d'utile (ou pire qu'avant) : aucun ordre, le cash attend.
+        if contribution_due:
+            plan.reason, plan.waiting_cash = "waiting", deployable
+        return plan
+
+    orders = [
+        PlannedOrder(symbol=s, side=side, qty=book[s], notional_value=book[s] * prices[s])
+        for side, book in (("sell", sells), ("buy", buys))
+        for s in targets
+        if book.get(s, 0.0) > 0
+    ]
+    invested_drift = max_drift_pts(weights_of(values, 0.0), targets) if sum(values.values()) > 0 else 0.0
+    if sells:
+        reason = "drift" if drift_due else "calendar"
+    elif contribution_due or (drift_due and invested_drift <= params.drift_threshold_pts + 1e-9):
+        reason = "contribution"  # la « dérive » ne vient que du cash non investi : c'est un apport
+    elif drift_due:
+        reason = "drift"
+    else:
+        reason = "calendar"
+    plan.orders, plan.reason, plan.sells = orders, reason, bool(sells)
+    plan.weights_after = weights_of(new_values, new_cash)
+    plan.cash_after, plan.fees, plan.max_drift_after_pts = new_cash, fees, residual
+    return plan
 
 
 def first_trading_day_of_month(calendar, year: int, month: int) -> pd.Timestamp | None:

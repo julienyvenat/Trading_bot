@@ -105,9 +105,11 @@ def describe_plan(plan: RebalancePlan, params: CoreSatelliteParams, flow: float,
     )
     if plan.reason == "contribution":
         deployable = max(0.0, plan.cash_before - params.cash_buffer(plan.cash_before))
+        threshold = params.contribution_threshold(equity)
+        above = f" (seuil {fmt_eur(threshold)})" if deployable >= threshold - 1e-9 else ""
         lines.append(
-            f"{prefix}Plan cœur-satellite : {fmt_eur(deployable)} de cash à investir (seuil "
-            f"{fmt_eur(params.contribution_threshold(equity))}), vers les poches en retard, {how}"
+            f"{prefix}Plan cœur-satellite : apport — {fmt_eur(deployable)} de cash à investir{above}, "
+            f"vers les poches en retard, {how}"
         )
     elif plan.reason == "drift":
         symbol = max(params.targets, key=lambda s: abs(plan.weights_before.get(s, 0.0) - params.targets[s]))
@@ -146,6 +148,7 @@ def check_core_satellite_alerts(
     data_by_symbol: dict[str, pd.DataFrame],
     broker: Broker,
     note,
+    flags: dict | None = None,
 ) -> None:
     """Alertes d'INFORMATION du plan, chacune notifiée une fois par
     franchissement (réarmée quand la baisse est revenue sous la moitié du
@@ -155,7 +158,7 @@ def check_core_satellite_alerts(
     alerts = config.live.alerts
     if not alerts.enabled:
         return
-    flags = state.alert_flags
+    flags = state.alert_flags if flags is None else flags
     plan = plan_summary(params)
 
     def crossing(key_prefix: str, levels: list[float], drop: float) -> float | None:
@@ -235,7 +238,10 @@ def run_core_satellite_cycle(
     calendar = MarketCalendar(config.market.calendar)
     today = pd.Timestamp.now(tz=calendar.timezone).tz_localize(None).normalize()
 
+    # Dry-run : rien n'est persisté (parts, alertes déjà notifiées, note « pas
+    # de stop ») — on travaille sur des copies, jetées en fin de cycle.
     cs = copy.deepcopy(state.core_satellite) if dry_run else state.core_satellite
+    flags = dict(state.alert_flags) if dry_run else state.alert_flags
     flow = update_units(cs, cash, qty, prices)
     cs.setdefault("last_calendar_year", int(today.year))
     calendar_due = calendar_rebalance_due(params, today, cs.get("last_calendar_year"), calendar)
@@ -247,14 +253,26 @@ def run_core_satellite_cycle(
         for line in describe_plan(plan, params, flow, equity):
             note(broker, line)
         execute_orders(plan.orders, broker, dry_run=dry_run)
-        if not state.alert_flags.get("core_satellite_no_stop_explained") and any(o.side == "buy" for o in plan.orders):
+        if not flags.get("core_satellite_no_stop_explained") and any(o.side == "buy" for o in plan.orders):
             note(
                 broker,
                 f"Pas de stop à poser ({', '.join(broker_ticker(s) for s in sleeves)}) : risk.stop_mode vaut none "
                 "dans cette config."
                 + (" Des alertes d'information préviennent en cas de forte baisse, sans jamais vendre." if config.live.alerts.enabled else ""),
             )
-            state.alert_flags["core_satellite_no_stop_explained"] = True
+            flags["core_satellite_no_stop_explained"] = True
+        cs.pop("waiting_notified", None)
+    elif plan.reason == "waiting":
+        # Cash à investir mais aucun achat utile : on le dit, une fois par montant.
+        waiting = round(plan.waiting_cash, 2)
+        if cs.get("waiting_notified") != waiting:
+            note(
+                broker,
+                f"Plan cœur-satellite : {fmt_eur(plan.waiting_cash)} de cash en attente — aucun achat possible ne "
+                f"rapproche le portefeuille de ses cibles (ordre minimum {fmt_eur(rules.min_order_value)}, poches "
+                "en retard trop proches de leur cible). Il sera investi avec le prochain apport. Aucun ordre à passer.",
+            )
+            cs["waiting_notified"] = waiting
     else:
         logger.info(
             "Plan cœur-satellite : rien à faire (dérive max %.1f pts, cash %.2f €%s).",
@@ -263,7 +281,7 @@ def run_core_satellite_cycle(
             ", rééquilibrage annuel sans ordre utile" if calendar_due else "",
         )
 
-    check_core_satellite_alerts(config, params, state, cs, data_by_symbol, broker, note)
+    check_core_satellite_alerts(config, params, state, cs, data_by_symbol, broker, note, flags=flags)
 
     if not dry_run:
         if plan.orders:

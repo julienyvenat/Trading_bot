@@ -849,7 +849,12 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     else:
         _manage_replaced_stops(config, state, sizings, current_qty, data_by_symbol, last_prices, broker, dry_run, equity, today_str)
 
+    # Dry-run : les alertes sont affichées mais pas « consommées » (aucun
+    # drapeau de franchissement persisté).
+    flags_before = dict(state.alert_flags)
     check_alerts(config, state, data_by_symbol, equity, broker)
+    if dry_run:
+        state.alert_flags = flags_before
 
     state.last_known_positions = snapshot_positions(positions)
     _update_track_record(config, realized_trades)

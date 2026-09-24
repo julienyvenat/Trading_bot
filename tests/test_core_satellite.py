@@ -23,6 +23,8 @@ from trading_bot.portfolio.core_satellite import (
 from trading_bot.portfolio.fees import CommissionModel, ExecutionRules
 from trading_bot.state import LiveState
 
+import itertools
+
 from conftest import make_ohlcv
 from test_pea_backtest import FORTUNEO, make_buyhold_config
 
@@ -82,8 +84,8 @@ def test_no_action_within_band():
 def test_initial_cash_is_deployed_without_sells_in_whole_shares():
     plan = plan_rebalance({}, PRICES, 2306.59, PARAMS, RULES)
     assert plan.reason == "contribution" and not plan.sells
-    # 1 action PSP5 = 2,6 % du portefeuille : 7 (18 %) est le mieux finançable.
-    assert {o.symbol: o.qty for o in plan.orders} == {W: 202.0, SP: 7.0, LEV: 18.0}
+    assert {o.symbol: o.qty for o in plan.orders} == {W: 200.0, SP: 8.0, LEV: 17.0}
+    assert plan.max_drift_after_pts < 1.5
     assert all(o.side == "buy" and o.qty == int(o.qty) for o in plan.orders)
     assert _cost(plan.orders) <= 2306.59 - PARAMS.cash_buffer(2306.59) + 1e-9
     assert all(abs(plan.weights_after[s] - t) < 0.02 for s, t in TARGETS.items())
@@ -106,13 +108,13 @@ def test_contribution_below_threshold_waits():
     assert plan.orders == []
 
 
-def test_allocate_cash_redistributes_orders_too_small_for_their_fees():
+def test_allocate_cash_small_amount_never_exceeds_a_sleeve_gap():
     values = {W: 0.0, SP: 0.0, LEV: 0.0}
     buys = allocate_cash(values, PRICES, TARGETS, 300.0, RULES)
-    # Réparti au prorata, aucune poche n'atteindrait 150 € : tout va à une seule.
-    assert len(buys) == 1
-    (symbol, qty), = buys.items()
-    assert qty * PRICES[symbol] >= 150
+    # Au prorata, aucune poche n'atteindrait 150 € ; seule DCAM (écart 165 €)
+    # peut recevoir un ordre valable, et jamais plus que son écart + 1 action.
+    assert set(buys) == {W}
+    assert 150 <= buys[W] * PRICES[W] <= 0.55 * 300 + PRICES[W]
 
 
 def test_drift_fixed_by_cash_first_then_by_sales():
@@ -292,14 +294,14 @@ def test_live_first_cycle_one_push_then_silent(live):
     title, message = notifier.sent[0]
     assert title == "3 ordre(s) à passer"
     lines = message.split("\n")
-    assert lines[0].startswith("INFO : Plan cœur-satellite : 2 283,52 € de cash à investir")
+    assert lines[0].startswith("INFO : Plan cœur-satellite : apport — 2 283,52 € de cash à investir")
     assert lines[1].startswith("INFO : Poids : DCAM 0,0 % → 54,") and "(cible 55,0 %)" in lines[1]
     assert [line.split(" — ")[0] for line in lines[2:5]] == [
-        "ORDRE : ACHETER 202 DCAM", "ORDRE : ACHETER 7 PSP5", "ORDRE : ACHETER 18 CL2"
+        "ORDRE : ACHETER 200 DCAM", "ORDRE : ACHETER 8 PSP5", "ORDRE : ACHETER 17 CL2"
     ]
     assert lines[5].startswith("INFO : Pas de stop à poser (DCAM, PSP5, CL2) : risk.stop_mode vaut none")
     data = json.loads(account.read_text())
-    assert {s: p["qty"] for s, p in data["positions"].items()} == {W: 202, SP: 7, LEV: 18}
+    assert {s: p["qty"] for s, p in data["positions"].items()} == {W: 200, SP: 8, LEV: 17}
     assert data["cash"] > 0
     assert state.core_satellite["units"] == pytest.approx(2306.59)
 
@@ -321,7 +323,7 @@ def test_live_detects_contribution_and_buys_underweight(live):
     state = _cycle(config, broker, state, notifier)
     assert len(notifier.sent) == 2
     message = notifier.sent[1][1]
-    assert message.startswith("INFO : Apport détecté : +1 000,00 €. Plan cœur-satellite :")
+    assert message.startswith("INFO : Apport détecté : +1 000,00 €. Plan cœur-satellite : apport")
     assert "ORDRE : VENDRE" not in message and "ORDRE : ACHETER" in message
     assert "Pas de stop" not in message  # expliqué une seule fois
     # L'apport achète des parts à la NAV courante : pas de faux rendement.
@@ -433,3 +435,146 @@ def test_old_state_file_without_core_satellite_field_loads():
     assert state.core_satellite == {}
     state.core_satellite = {"units": 10.0, "last_qty": {W: 3.0}}
     assert LiveState.from_dict(state.to_dict()).core_satellite == state.core_satellite
+
+
+# --- Garanties de l'allocation (revue) ------------------------------------------
+
+
+def _max_drift(qty, cash):
+    values = {s: qty.get(s, 0.0) * PRICES[s] for s in TARGETS}
+    total = cash + sum(values.values())
+    return max(abs(values[s] / total - t) * 100 for s, t in TARGETS.items())
+
+
+def _after(qty, cash, plan):
+    qty = dict(qty)
+    for o in plan.orders:
+        qty[o.symbol] = qty.get(o.symbol, 0.0) + (o.qty if o.side == "buy" else -o.qty)
+    return qty, plan.cash_after
+
+
+def test_small_account_plus_300_eur_buys_only_underweight_within_gap():
+    """Revue : 2 306,59 € investis, puis +300 € d'apport. Avant correctif :
+    ACHETER 50 DCAM (48 -> 60 %, cible 55 %), dérive bloquée au-dessus du seuil."""
+    first = plan_rebalance({}, PRICES, 2306.59, PARAMS, RULES)
+    qty, cash = _after({}, 2306.59, first)
+    cash += 300.0
+    plan = plan_rebalance(qty, PRICES, cash, PARAMS, RULES)
+    assert plan.reason == "contribution" and not plan.sells
+    new_qty, new_cash = _after(qty, cash, plan)
+    assert _max_drift(new_qty, new_cash) <= min(_max_drift(qty, cash), PARAMS.drift_threshold_pts)
+    for o in plan.orders:
+        assert plan.weights_after[o.symbol] <= TARGETS[o.symbol] + PRICES[o.symbol] / (cash + 2306.59) + 1e-9
+    assert plan.weights_after[W] < 0.56
+    # Cycle suivant : dans la bande, rien à faire.
+    assert plan_rebalance(new_qty, PRICES, new_cash, PARAMS, RULES).orders == []
+
+
+def test_overweight_sleeve_is_never_bought():
+    qty = _qty_at_target(20000)
+    qty[W] = float(int(qty[W] * 1.15))  # DCAM au-dessus de sa cible, même cash compris
+    equity = 1000.0 + sum(qty[s] * PRICES[s] for s in TARGETS)
+    assert qty[W] * PRICES[W] > 0.55 * equity
+    plan = plan_rebalance(qty, PRICES, 1000.0, PARAMS, RULES)
+    assert plan.orders and all(o.symbol != W for o in plan.orders if o.side == "buy")
+
+
+def test_cash_waits_when_no_useful_buy_and_says_why():
+    qty = {W: 200.0, SP: 8.0, LEV: 17.0}
+    # Toutes les poches sont à moins de 150 € de leur cible : rien de valable.
+    plan = plan_rebalance(qty, PRICES, 240.0, PARAMS, RULES)
+    assert plan.orders == [] and plan.reason == "waiting" and plan.waiting_cash > 200
+
+
+def test_calendar_cycle_with_small_buys_is_labelled_calendar():
+    qty = _qty_at_target(20000)
+    qty[LEV] = float(int(qty[LEV] * 0.9))  # ~2,5 pts de retard, sous le seuil
+    plan = plan_rebalance(qty, PRICES, 120.0, PARAMS, RULES, calendar_due=True)
+    assert plan.orders and plan.reason == "calendar"
+
+
+def _brute_force_best_buy_only(qty, cash, params):
+    """Toutes les combinaisons d'achats en actions entières respectant les
+    mêmes règles (écart + 1 action, garde-fous, cash) : dérive max minimale."""
+    values = {s: qty.get(s, 0.0) * PRICES[s] for s in TARGETS}
+    deployable = max(0.0, cash - params.cash_buffer(cash))
+    investable = sum(values.values()) + deployable
+    ranges = []
+    for s, t in TARGETS.items():
+        gap = t * investable - values[s]
+        options = [0]
+        if gap > 0:
+            for n in range(1, int(gap // PRICES[s]) + 2):
+                notional = n * PRICES[s]
+                fee = RULES.commission.fee(notional)
+                if notional >= RULES.min_order_value and fee <= RULES.max_fee_pct * notional:
+                    options.append(n)
+        ranges.append(options)
+    best = None
+    for combo in itertools.product(*ranges):
+        cost = sum(n * PRICES[s] + RULES.commission.fee(n * PRICES[s]) for s, n in zip(TARGETS, combo) if n)
+        if cost > deployable + 1e-9:
+            continue
+        new = {s: qty.get(s, 0.0) + n for s, n in zip(TARGETS, combo)}
+        drift = _max_drift(new, cash - cost)
+        best = drift if best is None else min(best, drift)
+    return best
+
+
+def test_fuzz_plans_never_worsen_drift_and_respect_gaps():
+    rng = np.random.default_rng(12345)
+    worsened, overbought = [], []
+    for _ in range(3000):
+        scale = float(rng.choice([2500.0, 8000.0, 20000.0, 60000.0]))
+        weights = rng.dirichlet([1.0, 1.0, 1.0])
+        qty = {s: float(int(scale * w / PRICES[s])) for s, w in zip(TARGETS, weights)}
+        cash = float(rng.choice([0.0, 20.0, 150.0, 300.0, 1000.0, 0.3 * scale])) * float(rng.uniform(0.5, 1.5))
+        calendar = bool(rng.random() < 0.2)
+        plan = plan_rebalance(qty, PRICES, cash, PARAMS, RULES, calendar_due=calendar)
+        before = _max_drift(qty, cash)
+        new_qty, new_cash = _after(qty, cash, plan)
+        if plan.orders and _max_drift(new_qty, new_cash) > before + 1e-9:
+            worsened.append((qty, cash))
+        assert new_cash >= -1e-6
+        equity = cash + sum(qty[s] * PRICES[s] for s in TARGETS)
+        for o in plan.orders:
+            if o.side == "buy" and not plan.sells:
+                deployable = cash - PARAMS.cash_buffer(cash)
+                gap = TARGETS[o.symbol] * (equity - cash + deployable) - qty[o.symbol] * PRICES[o.symbol]
+                if gap <= 0 or o.notional_value > gap + PRICES[o.symbol] + 1e-6:
+                    overbought.append((o.symbol, qty, cash))
+    assert worsened == [] and overbought == []
+
+
+def test_fuzz_buy_only_matches_brute_force_within_band():
+    """Petits apports (recherche exhaustive des deux côtés) : si une
+    combinaison d'achats seuls ramène dans la bande, le plan y arrive aussi."""
+    rng = np.random.default_rng(7)
+    checked = 0
+    for _ in range(300):
+        scale = float(rng.choice([2300.0, 4000.0]))
+        weights = np.clip(np.array(list(TARGETS.values())) + rng.normal(0, 0.04, 3), 0.01, None)
+        weights /= weights.sum()
+        qty = {s: float(int(scale * w / PRICES[s])) for s, w in zip(TARGETS, weights)}
+        cash = float(rng.uniform(200.0, 700.0))
+        plan = plan_rebalance(qty, PRICES, cash, PARAMS, RULES)
+        if plan.sells:
+            continue
+        best = _brute_force_best_buy_only(qty, cash, PARAMS)
+        new_qty, new_cash = _after(qty, cash, plan)
+        after = _max_drift(new_qty, new_cash)
+        if best is not None and best <= PARAMS.drift_threshold_pts:
+            assert after <= PARAMS.drift_threshold_pts + 1e-9, (qty, cash, best, after)
+        checked += 1
+    assert checked > 150
+
+
+def test_dry_run_does_not_consume_alerts_or_no_stop_note(live):
+    config, account, set_prices = live
+    broker = engine_module.build_broker(config)
+    state = engine_module.run_once(config, broker, dry_run=True, state=LiveState())
+    assert any("Pas de stop" in i.text for i in broker.drain_instructions())
+    assert state.alert_flags == {}
+    # Le vrai cycle suivant explique encore l'absence de stop.
+    state = engine_module.run_once(config, broker, dry_run=False, state=state)
+    assert any("Pas de stop" in i.text for i in broker.drain_instructions())
