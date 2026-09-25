@@ -517,6 +517,8 @@ le stop. Pas d'ordre Duo/Trio : ces stratégies n'ont pas d'objectif de gain.
 
 #### PEA cœur-satellite : plan passif 55 / 20 / 25, sans signal ni stop
 
+> **Config réellement utilisée : `config/config_pea_fortuneo_80_20.yaml`** — même moteur, mais **80 % DCAM / 20 % PSP5, sans levier** (décision du 2026-09-25 : la poche CL2 n'ajoute qu'environ +0,3 pt/an sur 1990→2026 pour ~10 pts de drawdown en plus, cf. tableaux ci-dessous). Compte manuel : `state/manual_account_fortuneo.json` (cash seul, AXA détenues à côté non gérées). La variante 55/20/25 reste documentée ci-dessous et dans `config_pea_core_satellite.example.yaml`.
+
 Config : `config/config_pea_core_satellite.example.yaml` (stratégie
 `core_satellite`, logique dans `trading_bot.portfolio.core_satellite`,
 partagée à l'identique par le backtest et le live).
