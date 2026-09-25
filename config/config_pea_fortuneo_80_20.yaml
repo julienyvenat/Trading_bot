@@ -22,7 +22,8 @@
 #
 # Lancer :
 #   python -m trading_bot paper --config config/config_pea_fortuneo_80_20.yaml --once   # un cycle, pour voir
-#   python -m trading_bot paper --config config/config_pea_fortuneo_80_20.yaml          # 1 cycle/jour après 18h30
+#   python -m trading_bot paper --config config/config_pea_fortuneo_80_20.yaml          # 1 cycle/jour après 18h30 + aperçu à 08:30
+#   python -m trading_bot morning-brief --config config/config_pea_fortuneo_80_20.yaml --print   # aperçu du matin, sans envoi
 
 universe:
   symbols:
@@ -120,6 +121,14 @@ live:
       title: "PEA Fortuneo 80/20"
       priority: 0
       alert_priority: 1
+  # Aperçu du matin (lecture seule) : valeur, poids, ordres du cycle d'hier
+  # soir à passer, cash, contexte de marché — un push silencieux par jour de bourse.
+  morning_brief:
+    enabled: true
+    at: "08:30" # heure de Paris
+    only_trading_days: true
+    priority: -1 # silencieux
+    catch_up_until: "12:00" # bot redémarré après 08:30 : aperçu envoyé jusqu'à midi, sauté au-delà
 
 optimization:
   metric: sharpe_ratio

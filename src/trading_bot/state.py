@@ -35,6 +35,11 @@ Mode `core_satellite` : `core_satellite` garde la comptabilité par parts
 (NAV hors apports, plus haut, dernier cash/quantités vus pour détecter un
 apport), l'année du dernier rééquilibrage calendaire et les plus hauts des
 poches suivies par les alertes de baisse.
+
+Aperçu du matin (`live.morning_brief`) : `last_morning_brief` (date locale
+du dernier aperçu envoyé, pour ne jamais l'envoyer deux fois le même jour,
+y compris après un redémarrage) et `last_cycle_orders` (ordres poussés par
+le dernier cycle du soir, rappelés le lendemain matin).
 """
 
 from __future__ import annotations
@@ -72,6 +77,10 @@ class LiveState:
     alert_flags: dict[str, bool] = field(default_factory=dict)
     last_daily_run: str | None = None
     core_satellite: dict = field(default_factory=dict)
+    last_morning_brief: str | None = None
+    # {"session": date ISO du cycle du soir, "orders": [texte de chaque ordre]}.
+    # Vide : aucun cycle du soir enregistré depuis l'ajout de l'aperçu du matin.
+    last_cycle_orders: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +97,8 @@ class LiveState:
             "alert_flags": dict(self.alert_flags),
             "last_daily_run": self.last_daily_run,
             "core_satellite": json.loads(json.dumps(self.core_satellite)),
+            "last_morning_brief": self.last_morning_brief,
+            "last_cycle_orders": json.loads(json.dumps(self.last_cycle_orders)),
         }
 
     @classmethod
@@ -113,6 +124,8 @@ class LiveState:
             alert_flags=dict(data.get("alert_flags", {})),
             last_daily_run=data.get("last_daily_run"),
             core_satellite=dict(data.get("core_satellite", {}) or {}),
+            last_morning_brief=data.get("last_morning_brief"),
+            last_cycle_orders=dict(data.get("last_cycle_orders", {}) or {}),
         )
 
 

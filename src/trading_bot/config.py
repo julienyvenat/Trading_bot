@@ -275,6 +275,32 @@ class PushoverConfig:
 
 
 @dataclass
+class MorningBriefConfig:
+    """Aperçu du matin (voir `trading_bot.live.morning_brief`) : UN push
+    concis avant l'ouverture — valeur du portefeuille, poids vs cibles,
+    ordres du cycle de la veille à passer, cash, contexte de marché. Lecture
+    seule : n'envoie ni ne modifie aucun ordre, ne touche ni au fichier de
+    compte ni à l'état du plan. Exécuté par le même process que le cycle du
+    soir (`live.daily_run_after` requis) ; mode `core_satellite` + broker
+    manuel uniquement.
+
+    Désactivé par défaut (rétrocompatible)."""
+
+    enabled: bool = False
+    # Heure locale d'envoi (fuseau du calendrier de marché, Europe/Paris pour XPAR).
+    at: str = "08:30"
+    # False : envoyé aussi les jours de fermeture (il le dit alors).
+    only_trading_days: bool = True
+    # Priorité Pushover : -1 = silencieux (pas de son ni de vibration).
+    priority: int = -1
+    # None : titre des notifications + " — aperçu du matin".
+    title: str | None = None
+    # Bot (re)démarré après `at` sans aperçu envoyé ce jour-là : envoyé tout
+    # de suite s'il est encore avant cette heure locale, sinon sauté.
+    catch_up_until: str = "12:00"
+
+
+@dataclass
 class NotificationsConfig:
     pushover: PushoverConfig = field(default_factory=PushoverConfig)
 
@@ -310,6 +336,7 @@ class LiveConfig:
     # None (défaut) : boucle à intervalle fixe, inchangée.
     daily_run_after: str | None = None
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    morning_brief: MorningBriefConfig = field(default_factory=MorningBriefConfig)
 
 
 @dataclass
@@ -392,6 +419,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     notifications_raw = live_raw.pop("notifications", None) or {}
     pushover_raw = notifications_raw.get("pushover", None) or {}
     alerts_raw = live_raw.pop("alerts", None) or {}
+    morning_brief_raw = live_raw.pop("morning_brief", None) or {}
 
     return AppConfig(
         symbols=list(raw["universe"]["symbols"]),
@@ -409,6 +437,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             manual=ManualBrokerConfig(**manual_raw),
             notifications=NotificationsConfig(pushover=PushoverConfig(**pushover_raw)),
             alerts=AlertsConfig(**alerts_raw),
+            morning_brief=MorningBriefConfig(**morning_brief_raw),
         ),
         news_sentiment=NewsSentimentConfig(**news_sentiment_raw),
         optimization=OptimizationConfig(**optimization_raw),

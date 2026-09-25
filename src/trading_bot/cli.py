@@ -6,6 +6,7 @@ Usage :
     python -m trading_bot optimize [--metric sharpe_ratio] [--max-workers N] [--top N]
     python -m trading_bot paper [--once] [--dry-run]
     python -m trading_bot notify-test [--config ...]
+    python -m trading_bot morning-brief [--config ...] [--print]
 """
 
 from __future__ import annotations
@@ -406,6 +407,34 @@ def cmd_notify_test(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_morning_brief(args: argparse.Namespace) -> None:
+    """Génère UN aperçu du matin à la demande (voir `trading_bot.live.
+    morning_brief`) : `--print` l'affiche sans rien envoyer, sinon il est
+    envoyé via Pushover (même si `live.morning_brief.enabled` ou
+    `live.notifications.pushover.enabled` valent false, pour tester). Lecture
+    seule : ni le fichier de compte ni l'état du bot ne sont modifiés (la
+    date du dernier aperçu planifié n'est pas touchée)."""
+    from trading_bot.live.morning_brief import build_morning_brief, send_morning_brief
+    from trading_bot.state import load_state
+
+    logger = setup_logging(log_file=None)
+    config = load_config(args.config)
+    try:
+        brief = build_morning_brief(config, load_state(config.live.state_file))
+    except (ValueError, OSError) as exc:
+        logger.error("Aperçu du matin impossible : %s", exc)
+        sys.exit(1)
+    if args.print:
+        print(brief.title)
+        print(brief.message)
+        return
+    if send_morning_brief(config, brief, force=True):
+        logger.info("Aperçu du matin envoyé (%d caractères) : vérifie ton téléphone.", len(brief.message))
+    else:
+        logger.error("Échec de l'envoi de l'aperçu du matin (voir l'avertissement ci-dessus).")
+        sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", default=None, help="Chemin vers config.yaml (par défaut: config/config.yaml)")
@@ -504,6 +533,14 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[config_parser],
     )
     notify_test_parser.set_defaults(func=cmd_notify_test)
+
+    morning_brief_parser = subparsers.add_parser(
+        "morning-brief",
+        help="Génère un aperçu du matin à la demande (Pushover, ou --print pour l'afficher sans l'envoyer).",
+        parents=[config_parser],
+    )
+    morning_brief_parser.add_argument("--print", action="store_true", help="Affiche l'aperçu sans l'envoyer.")
+    morning_brief_parser.set_defaults(func=cmd_morning_brief)
 
     return parser
 

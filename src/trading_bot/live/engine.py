@@ -53,7 +53,11 @@ Mode PEA manuel (`live.broker: "manual"`) — ajouts :
     clôture (voir `seconds_until_daily_run`) ;
   - stratégie `core_satellite` : allocation passive à poids cibles, cycle
     dédié (voir `trading_bot.live.core_satellite`) à la place du pipeline
-    signaux -> risque -> ordres.
+    signaux -> risque -> ordres ;
+  - `live.morning_brief` : aperçu du matin en lecture seule, dans le même
+    process que le cycle du soir (voir `trading_bot.live.morning_brief`) ;
+    les ordres poussés par le cycle du soir sont mémorisés
+    (`state.last_cycle_orders`) pour être rappelés le lendemain matin.
 """
 
 from __future__ import annotations
@@ -69,6 +73,8 @@ from trading_bot.execution.broker_base import Broker
 from trading_bot.execution.rebalancer import apply_execution_rules, execute_orders, plan_orders
 from trading_bot.indicators import atr, sma
 from trading_bot.live.trade_realization import detect_realized_trades, snapshot_positions
+from trading_bot.live.morning_brief import ACTION_KINDS as MORNING_BRIEF_ACTION_KINDS
+from trading_bot.live.morning_brief import build_morning_brief, send_morning_brief, seconds_until_morning_brief
 from trading_bot.logger import get_logger
 from trading_bot.market_calendar import MarketCalendar
 from trading_bot.notify.pushover import PushoverNotifier, truncate_lines
@@ -216,18 +222,20 @@ def build_notifier(config: AppConfig) -> PushoverNotifier:
     return PushoverNotifier(config.live.notifications.pushover)
 
 
-def notify_cycle_instructions(notifier: PushoverNotifier, broker: Broker) -> None:
+def notify_cycle_instructions(notifier: PushoverNotifier, broker: Broker) -> list:
     """Envoie UN SEUL push récapitulant toutes les instructions manuelles
     (ordres, stops, stops à annuler) affichées pendant le cycle par un broker
     manuel (voir `ManualBroker.drain_instructions`). Rien n'est envoyé s'il
-    n'y a rien à faire, ni pour un broker automatique (Alpaca)."""
+    n'y a rien à faire, ni pour un broker automatique (Alpaca). Renvoie les
+    instructions vidées (liste vide si aucune), pour `remember_cycle_orders`."""
     drain = getattr(broker, "drain_instructions", None)
     if drain is None:
-        return
+        return []
+    instructions: list = []
     try:
         instructions = drain()
         if not instructions:
-            return
+            return instructions
         prefixes = {"order": "ORDRE : ", "stop": "STOP : ", "cancel": "", "info": "INFO : ", "alert": "ALERTE : "}
         lines = [prefixes.get(i.kind, "") + i.text for i in instructions]
         actions = sum(1 for i in instructions if i.kind in ("order", "stop"))
@@ -241,6 +249,19 @@ def notify_cycle_instructions(notifier: PushoverNotifier, broker: Broker) -> Non
         notifier.send(title, truncate_lines(lines))
     except Exception:  # noqa: BLE001 - une notification ne doit jamais casser la boucle live
         logger.warning("Échec de la préparation de la notification des ordres manuels.", exc_info=True)
+    return instructions
+
+
+def remember_cycle_orders(state: LiveState, session: str, instructions: list) -> None:
+    """Mémorise les ordres/stops poussés par le cycle du soir de `session`,
+    rappelés par l'aperçu du lendemain matin. Un nouvel essai du même cycle
+    (après une erreur) complète la liste au lieu de l'écraser."""
+    texts = [i.text for i in instructions if getattr(i, "kind", None) in MORNING_BRIEF_ACTION_KINDS]
+    record = state.last_cycle_orders
+    if record.get("session") == session:
+        record["orders"] = list(record.get("orders", [])) + texts
+    else:
+        state.last_cycle_orders = {"session": session, "orders": texts}
 
 
 def notify_risk_transitions(
@@ -887,6 +908,36 @@ def seconds_until_daily_run(
     raise RuntimeError(f"Aucun jour de bourse trouvé dans les {search_days} prochains jours.")
 
 
+def _now_utc() -> pd.Timestamp:
+    """Horloge de la boucle quotidienne (isolée pour les tests)."""
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _morning_brief_usable(config: AppConfig) -> bool:
+    """`live.morning_brief.enabled`, et configuration compatible (cycle
+    quotidien, mode core_satellite sur broker manuel) ; sinon avertit."""
+    if not config.live.morning_brief.enabled:
+        return False
+    if not config.live.daily_run_after:
+        logger.warning("`live.morning_brief` ignoré : il nécessite `live.daily_run_after` (cycle quotidien).")
+        return False
+    if config.live.broker != "manual" or core_satellite_params(config) is None:
+        logger.warning("`live.morning_brief` ignoré : disponible en mode core_satellite avec `live.broker: manual`.")
+        return False
+    return True
+
+
+def _run_morning_brief(config: AppConfig, state: LiveState, now: pd.Timestamp) -> None:
+    """Construit et envoie l'aperçu du matin. Lecture seule, ne lève jamais."""
+    try:
+        brief = build_morning_brief(config, state, now=now)
+        logger.info("Aperçu du matin :\n%s", brief.message)
+        if not send_morning_brief(config, brief):
+            logger.warning("Aperçu du matin non envoyé (Pushover désactivé ou en échec).")
+    except Exception:  # noqa: BLE001 - un aperçu raté ne doit jamais bloquer le cycle du soir
+        logger.exception("Échec de l'aperçu du matin (ignoré, aucun impact sur le cycle du soir).")
+
+
 def run_forever(config: AppConfig, dry_run: bool = False) -> None:
     """Boucle infinie : exécute un cycle à chaque instant actionnable (marché
     ouvert, hors buffer de clôture), et dort intelligemment le reste du temps.
@@ -928,14 +979,37 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
             daily_run_after,
             calendar.timezone,
         )
+    morning = config.live.morning_brief
+    brief_enabled = _morning_brief_usable(config)
+    if brief_enabled:
+        logger.info("Aperçu du matin actif : %s (heure de %s), lecture seule.", morning.at, calendar.timezone)
 
     while True:
         if daily_run_after:
-            wait_seconds, session_str = seconds_until_daily_run(
-                pd.Timestamp.now(tz="UTC"), calendar, daily_run_after, state.last_daily_run
-            )
+            now = _now_utc()
+            wait_seconds, session_str = seconds_until_daily_run(now, calendar, daily_run_after, state.last_daily_run)
+            brief_wait = None
+            if brief_enabled:
+                brief_wait, brief_day = seconds_until_morning_brief(
+                    now,
+                    calendar,
+                    morning.at,
+                    state.last_morning_brief,
+                    morning.only_trading_days,
+                    morning.catch_up_until,
+                )
+                if brief_wait <= 0:
+                    _run_morning_brief(config, state, now)
+                    # Noté même en cas d'échec : jamais deux aperçus le même jour.
+                    state.last_morning_brief = brief_day
+                    save_state(config.live.state_file, state)
+                    continue
             if wait_seconds > 0:
-                logger.info("Prochain cycle quotidien (%s) dans %.0f min.", session_str, wait_seconds / 60)
+                if brief_wait is not None and brief_wait < wait_seconds:
+                    logger.info("Prochain aperçu du matin (%s) dans %.0f min.", brief_day, brief_wait / 60)
+                    wait_seconds = brief_wait
+                else:
+                    logger.info("Prochain cycle quotidien (%s) dans %.0f min.", session_str, wait_seconds / 60)
                 time.sleep(min(wait_seconds, MAX_SLEEP_CHUNK_SECONDS))
                 continue
             try:
@@ -949,12 +1023,18 @@ def run_forever(config: AppConfig, dry_run: bool = False) -> None:
                 consecutive_errors += 1
                 if consecutive_errors == 1:
                     notify_cycle_error(notifier, exc)
-                notify_cycle_instructions(notifier, broker)
+                instructions = notify_cycle_instructions(notifier, broker)
+                if config.live.broker == "manual" and not dry_run:
+                    remember_cycle_orders(state, session_str, instructions)
+                    save_state(config.live.state_file, state)
                 time.sleep(MAX_SLEEP_CHUNK_SECONDS)
                 continue
             state.last_daily_run = session_str
             save_state(config.live.state_file, state)
-            notify_cycle_instructions(notifier, broker)
+            instructions = notify_cycle_instructions(notifier, broker)
+            if config.live.broker == "manual" and not dry_run:
+                remember_cycle_orders(state, session_str, instructions)
+                save_state(config.live.state_file, state)
             continue
 
         try:
