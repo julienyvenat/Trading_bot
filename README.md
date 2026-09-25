@@ -716,6 +716,57 @@ ETF Amundi non modélisée ; fiscalité ignorée (PEA) ; ordres exécutés à
 l'ouverture du lendemain au cours d'ouverture (le vrai cours du matin peut
 différer, d'où le coussin de cash).
 
+#### Aperçu du matin (push silencieux avant l'ouverture)
+
+`live.morning_brief` (activé dans `config_pea_fortuneo_80_20.yaml`, désactivé
+par défaut ailleurs) : le même process `paper` envoie, en plus du cycle de
+18h30, **un push à 08:30** (heure de Paris, jours de bourse XPAR, priorité
+Pushover -1 = sans son). Lecture seule : aucun ordre, fichier de compte et
+état du plan jamais modifiés, alertes jamais « consommées ».
+
+```yaml
+live:
+  morning_brief:
+    enabled: true
+    at: "08:30"
+    only_trading_days: true   # false : envoyé aussi week-end/fériés (« Bourse fermée »)
+    priority: -1
+    catch_up_until: "12:00"   # bot redémarré après 08:30 sans aperçu : envoyé jusqu'à midi
+    # title: "…"              # défaut : titre des notifications + « — aperçu du matin »
+```
+
+Contenu (< 1 024 caractères) : valeur à la dernière clôture et variation sur
+la veille / le mois / l'année (à positions actuelles, cash compris) ; poids
+contre cibles et dérive max contre le seuil de 5 pts ; **rappel des ordres
+poussés la veille au soir** (mémorisés dans `state.last_cycle_orders`) ou
+« Aucun ordre à passer aujourd'hui. » ; cash non investi et seuil d'apport ;
+alerte de drawdown active le cas échéant ; une ligne de marché (S&P 500,
+MSCI World via URTH, futures S&P, EUR/USD). Une donnée indisponible est omise.
+Un aperçu déjà envoyé n'est jamais renvoyé le même jour (`state.last_morning_brief`),
+même après un redémarrage. Seul le cycle planifié (`paper` sans `--once`)
+mémorise ses ordres pour l'aperçu du lendemain.
+
+```bash
+python -m trading_bot morning-brief --config config/config_pea_fortuneo_80_20.yaml --print  # affiche, n'envoie rien
+python -m trading_bot morning-brief --config config/config_pea_fortuneo_80_20.yaml          # envoie un aperçu maintenant
+```
+
+Exemple réel (`--print` le 25/09/2026 à 7h, 292 DCAM + 7 PSP5 + 56,41 € de
+cash, un ordre fictif mémorisé la veille ; yfinance n'avait pas encore
+publié la clôture du 24/09, d'où la ligne « pas encore publiée ») :
+
+```
+PEA Fortuneo 80/20 — aperçu du matin
+Valeur à la clôture du 23/09 : 2 302,56 € (-3,63 €, -0,2 % sur la veille).
+Perf. à positions actuelles : sept. +1,9 % · 2026 +15,2 %.
+Clôture du 24/09 pas encore publiée par yfinance.
+Poids : DCAM 79,4 % (cible 80,0 %) · PSP5 18,1 % (cible 20,0 %). Dérive max 1,9 pts (seuil 5) : dans la bande.
+Ordres à passer aujourd'hui (cycle du 24/09) :
+- ACHETER 2 PSP5 — ordre au marché (ou à cours limité 59,88 €)
+Cash non investi : 56,41 € — sous le seuil d'apport (200,00 €) : il attend le prochain versement.
+Marchés : S&P 500 +0,0 % · MSCI World -0,1 % · futures S&P -0,1 % · EUR/USD 1,1374 (-0,1 %).
+```
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
