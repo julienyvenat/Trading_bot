@@ -20,6 +20,11 @@ class MarketCalendar:
         self.name = name
         self._calendar = mcal.get_calendar(name)
 
+    @property
+    def timezone(self) -> str:
+        """Fuseau horaire local de la place (ex: "Europe/Paris" pour XPAR)."""
+        return str(self._calendar.tz)
+
     def trading_days(self, start, end) -> pd.DatetimeIndex:
         """Jours de bourse (sans les horaires) entre `start` et `end` inclus."""
         schedule = self._calendar.schedule(start_date=start, end_date=end)

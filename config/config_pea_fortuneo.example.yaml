@@ -1,5 +1,9 @@
 # Variante PEA (ex: Fortuneo, ou tout courtier PEA sans API de trading).
 #
+# ATTENTION : backtestée à frais réels Fortuneo avec un petit capital, cette
+# config active PERD de l'argent (voir README, section "PEA Fortuneo v2") :
+# préfère config_pea_buyhold.example.yaml (ou config_pea_etf_momentum).
+#
 # Fortuneo (comme la quasi-totalité des courtiers PEA en France) n'expose
 # aucune API de passage d'ordres : le bot ne peut donc PAS trader
 # automatiquement dessus. Cette config utilise `live.broker: "manual"` (voir

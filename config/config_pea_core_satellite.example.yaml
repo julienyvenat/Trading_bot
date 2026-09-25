@@ -1,0 +1,139 @@
+# PEA Fortuneo — plan CŒUR-SATELLITE passif, sans API, sans signal, sans stop.
+#
+#   55 % DCAM  (Amundi PEA Monde MSCI World UCITS ETF)          -> cœur mondial
+#   20 % PSP5  (Amundi PEA S&P 500 UCITS ETF Acc)                -> cœur US
+#   25 % CL2   (Amundi MSCI USA Daily (2x) Leveraged UCITS ETF)  -> satellite à levier x2
+#
+# Le bot ne fait RIEN tant qu'aucune poche ne dérive de plus de
+# `drift_threshold_pts` points de sa cible, hors rééquilibrage annuel (premier
+# jour de bourse de janvier) et hors apport à investir. Quand il agit, il
+# investit d'abord le cash dans les poches en retard (aucune vente), et ne
+# vend que si la dérive persiste après ces achats. Voir README, section
+# "PEA cœur-satellite" (plan, résultats, limites) et
+# trading_bot.portfolio.core_satellite (logique exacte, partagée backtest/live).
+#
+# Pourquoi DCAM pour le MSCI World : Amundi, éligible PEA par construction
+# ("PEA Monde"), ~6 € la part (actions entières faciles, contrairement à CW8
+# ~700 €), volume Euronext élevé. Limite : yfinance n'a son historique que
+# depuis 03/2025 — le backtest long (scripts/pea_core_satellite_compare.py)
+# utilise CW8.PA (même indice, Amundi) comme proxy avant cette date.
+#
+# APPORTS : après un virement sur le PEA, ajoute le montant au "cash" de
+# `live.manual.account_file`. Au cycle suivant, si le cash non investi dépasse
+# max(contribution_min_eur, contribution_min_pct x valeur du portefeuille), le
+# bot pousse les achats à passer (poches les plus en retard d'abord).
+#
+# AVANT DE DÉMARRER, crée `live.manual.account_file` avec le cash réel du PEA
+# (hors lignes que le bot ne gère pas, ex. des AXA détenues à côté) :
+#   {"cash": 2306.59, "positions": {}}
+#
+# Lancer :
+#   python -m trading_bot backtest --config config/config_pea_core_satellite.yaml
+#   python -m trading_bot paper --config config/config_pea_core_satellite.yaml --once   # un cycle, pour voir
+#   python -m trading_bot paper --config config/config_pea_core_satellite.yaml          # 1 cycle/jour après clôture
+
+universe:
+  symbols:
+    - DCAM.PA
+    - PSP5.PA
+    - CL2.PA
+  timeframe: "1Day"
+
+strategies:
+  - name: core_satellite
+    enabled: true
+    weight: 1.0
+    params:
+      targets: # somme = 1
+        DCAM.PA: 0.55
+        PSP5.PA: 0.20
+        CL2.PA: 0.25
+      drift_threshold_pts: 5.0 # rééquilibrage si une poche s'écarte de plus de 5 points de sa cible
+      annual_rebalance_month: 1 # premier jour de bourse de janvier ; null = jamais
+      calendar_min_drift_pts: 1.0 # au rééquilibrage annuel, on ne vend rien pour moins d'1 point d'écart
+      contribution_min_eur: 200 # cash non investi à partir duquel on achète...
+      contribution_min_pct: 0.01 # ...ou 1 % de la valeur du portefeuille si c'est plus
+      # Coussin jamais investi = max(10 €, 1 % du cash à investir) : le cours
+      # d'exécution du lendemain peut être un peu plus haut que celui de la veille.
+      cash_buffer_eur: 10
+      cash_buffer_pct: 0.01
+
+risk:
+  allow_short: false
+  max_gross_exposure_pct: 1.0
+  max_position_weight_pct: 1.0
+  risk_per_trade_pct: 1.0
+  atr_stop_multiple: 6.0
+  atr_window: 14
+  max_open_positions: 3
+  # Coupe-circuits désactivés (1.0 = jamais) : vendre tout à -20 % serait
+  # l'opposé du plan.
+  max_daily_loss_pct: 1.0
+  max_drawdown_pct: 1.0
+  stop_mode: "none" # obligatoire dans ce mode : aucun stop
+  trailing_stop_pct: null
+  stop_reentry: "immediate"
+  stop_reentry_sma_window: 200
+
+market:
+  calendar: "XPAR"
+  close_buffer_minutes: 15
+  regime_filter:
+    enabled: false
+  volatility_filter:
+    enabled: false
+
+backtest:
+  # DCAM n'a d'historique yfinance que depuis le 04/03/2025 : ce backtest
+  # "direct" est donc court. Pour 2014→ (proxy CW8) et les tests de stress
+  # synthétiques 1990→2026 : python scripts/pea_core_satellite_compare.py
+  start_date: "2025-03-05"
+  end_date: null
+  initial_cash: 2306.59
+  monthly_contribution: 0 # ex. 100 : apport simulé le 1er jour de bourse de chaque mois
+  commission_pct: 0.005 # ignoré quand commission_schedule est renseigné
+  # Barème standard Fortuneo Bourse, Euronext (à revérifier sur la grille en
+  # vigueur). Promo "frais d'achat remboursés sur une sélection d'ETF Amundi"
+  # NON modélisée (prudence).
+  commission_schedule:
+    tiers:
+      - {up_to: 500, pct: 0.005, min: 1.95} # <= 500 € : 0,50 %, min 1,95 €
+      - {up_to: 2000, fixed: 1.95} # 500 à 2 000 € : 1,95 € fixe
+      - {up_to: null, pct: 0.002} # > 2 000 € : 0,20 %
+  whole_shares: true
+  min_order_value: 150 # sous 150 €, les frais (>= 1,95 €) dépassent 1,3 %
+  max_fee_pct: 0.02
+  rebalance_tolerance_pct: 0.0 # non utilisé par ce mode (seuil de dérive ci-dessus)
+  warmup_days: 0
+  data_source: "yfinance"
+
+live:
+  loop_interval_seconds: 3600 # ignoré (daily_run_after)
+  trade_only_when_market_open: false
+  daily_run_after: "18:30" # un cycle par jour de bourse après la clôture ; ordres à passer le lendemain
+  state_file: "state/live_state_pea_core_satellite.json"
+  broker: "manual"
+  manual:
+    account_file: "state/manual_account_pea_core_satellite.json"
+    native_trailing_stop: false
+    limit_offset_pct: 0.005
+  alerts:
+    enabled: true
+    symbol: "PSP5.PA" # non utilisé par ce mode
+    sma_window: 200 # non utilisé par ce mode
+    # Paliers de drawdown du portefeuille (hors effet des apports), notifiés
+    # une fois chacun avec un rappel du plan ; jamais d'ordre.
+    drawdown_levels: [0.20, 0.35, 0.50]
+    # Baisse de la poche à levier depuis son plus haut.
+    symbol_drop_levels:
+      CL2.PA: [0.30, 0.50]
+  notifications:
+    pushover:
+      enabled: true
+      title: "PEA cœur-satellite"
+      priority: 0
+      alert_priority: 1
+
+optimization:
+  metric: sharpe_ratio
+  grids: {}

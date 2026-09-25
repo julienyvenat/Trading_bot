@@ -390,6 +390,330 @@ Une panne de Pushover (réseau, identifiants invalides ou absents) ne fait
 jamais échouer le cycle de trading : elle est simplement journalisée en
 avertissement. Désactivé par défaut dans les autres configs.
 
+#### PEA Fortuneo v2 : buy & hold PSP5 ou rotation mensuelle d'ETF
+
+Constat de départ : la config active `config_pea_fortuneo.example.yaml`
+(actions du CAC 40 + 3 stratégies journalières, boucle horaire) perd de
+l'argent une fois les frais réels comptés — backtest 2018→09/2026 avec
+2 306,59 €, barème Fortuneo et actions entières : **-19,8 %** (≈ 28 ordres/an,
+480 € de frais, coupe-circuit de drawdown -20 % déclenché en route), contre **+237,5 %** pour un simple achat de PSP5. Deux modes
+à faible rotation la remplacent :
+
+| Mode | Config | Principe | Ordres à passer |
+|---|---|---|---|
+| (a) Buy & hold | `config/config_pea_buyhold.example.yaml` | 100 % PSP5 en actions entières, jamais revendu ; pas de stop, alertes d'information seulement (PSP5 sous sa SMA200, compte à -20 % de son plus haut) | 1 à l'entrée, puis ~0 |
+| (b) Dual momentum | `config/config_pea_etf_momentum.example.yaml` | 1 fois par mois : l'ETF au meilleur rendement 12 mois parmi PSP5 / PUST / CAC / ETZ / PAEEM, s'il est positif ; sinon cash | ~6/an |
+
+**Hypothèses de frais** (`backtest.commission_schedule`, voir
+`trading_bot.portfolio.fees`, utilisées aussi en live) : barème standard
+Fortuneo sur Euronext — ordre ≤ 500 € : 0,50 % (min 1,95 €) ; 500 à 2 000 € :
+1,95 € ; > 2 000 € : 0,20 %. La promo « frais d'achat remboursés sur une
+sélection d'ETF Amundi (ordres de 500 à 100 000 €) jusqu'au 31/12/2026 »
+n'est **pas** modélisée (prudence). `backtest.whole_shares: true` : actions
+entières, achats plafonnés au cash frais compris ; `min_order_value: 150`,
+`max_fee_pct: 0.02` et `rebalance_tolerance_pct: 0.10` écartent les ordres
+qui ne valent pas leurs frais (une clôture complète passe toujours).
+Exécution à l'ouverture du lendemain du signal, comme le reste du backtest.
+
+**Résultats** (2018-01-01 → 2026-09-24, 2 306,59 € de départ, reproduire
+avec `python scripts/pea_compare.py`). (a) — choix du stop :
+
+Chaque cellule : CAGR / Max DD / Sharpe / Calmar. Frais et ordres/an sur la
+période complète.
+
+| Variante | 2018→2026 | En échantillon 2018-2022 | Hors échantillon 2023→ | Ordres/an | Frais |
+|---|---|---|---|---|---|
+| **Buy & hold PSP5, sans stop** | +14,7 % / -33,6 % / **0,91** / 0,44 | +11,3 % / -33,6 % / **0,67** / 0,34 | +18,8 % / -23,1 % / 1,33 / 0,81 | 0,1 | 4,59 € |
+| Stop suiveur ATR×4 (écart figé à l'entrée) | +8,5 % / -26,1 % / 0,69 / 0,33 | +3,8 % / -26,1 % / 0,33 / 0,15 | +16,2 % / -13,4 % / 1,41 / 1,21 | 7,6 | 382 € |
+| Stop suiveur ATR×6 | +9,3 % / -23,8 % / 0,71 / 0,39 | +5,4 % / -23,8 % / 0,43 / 0,23 | +14,0 % / -18,6 % / 1,13 / 0,76 | 2,8 | 158 € |
+| Stop suiveur ATR×8 | +9,9 % / -25,2 % / 0,72 / 0,39 | +5,8 % / -25,2 % / 0,43 / 0,23 | +17,1 % / -14,1 % / 1,42 / 1,21 | 1,2 | 58 € |
+| Stop suiveur 15 % | +7,8 % / -30,2 % / 0,59 / 0,26 | +2,6 % / -30,2 % / 0,24 / 0,09 | +16,5 % / -15,9 % / 1,33 / 1,04 | 1,5 | 69 € |
+| Stop suiveur 20 % | +11,9 % / -21,3 % / 0,84 / 0,56 | +9,5 % / -21,3 % / 0,64 / 0,44 | +14,7 % / -20,8 % / 1,17 / 0,71 | 0,6 | 35 € |
+| Stop suiveur 25 % | +10,0 % / -27,1 % / 0,71 / 0,37 | +7,8 % / -27,1 % / 0,54 / 0,29 | +12,4 % / -26,4 % / 0,97 / 0,47 | 0,6 | 31 € |
+
+Les stops sont modélisés comme un Stop Suiveur Fortuneo : seuil = plus haut
+depuis l'entrée × (1 - écart), exécuté au seuil, ou à l'ouverture en cas de
+gap. On ne rachète que lorsque PSP5 repasse au-dessus de sa SMA200 (sinon on
+rachèterait le lendemain).
+
+Lecture honnête :
+- **Sur toute la période et en échantillon**, tous les stops perdent face au
+  buy & hold en CAGR (-3 à -7 pts/an) et en Sharpe. Seul le stop 20 %
+  améliore le Calmar (0,56 contre 0,44), et il le doit au seul krach de
+  mars 2020.
+- **Hors échantillon (2023→)**, ATR×8 (DD -14,1 %, Sharpe 1,42) et 15 %
+  (DD -15,9 %, Sharpe 1,33) divisent presque par deux le drawdown du buy &
+  hold (-23,1 %), à Sharpe égal ou meilleur, pour un rendement annuel plus
+  faible de -1,7 et -2,3 pts. ATR×4 fait pareil (-13,4 %, 1,41), mais passe
+  7,6 ordres/an et paie 382 € de frais. Le stop 20 % réduit un peu le
+  drawdown (-20,8 %) mais perd 4 pts de CAGR, et son Sharpe est plus bas (1,17).
+- Même hors échantillon, tous les stops restent sous le buy & hold en CAGR.
+  Les classements s'inversent d'une sous-période à
+  l'autre, signe d'une forte dépendance à quelques épisodes.
+
+**Défaut retenu : pas de stop** (meilleur rendement et meilleur Sharpe sur
+la période complète), avec des alertes d'information uniquement. Un stop
+suiveur large reste un choix légitime si tu préfères limiter le drawdown :
+ATR×8 ou 15 % ont été les plus convaincants hors échantillon, au prix d'un
+rendement plus faible. Pour l'activer : `risk.stop_mode: trailing_pct`,
+avec `trailing_stop_pct: 0.15`, ou `null` avec `atr_stop_multiple: 8`.
+
+(b) — petite grille (lookback 6/12 mois × top 1/2), rien d'autre d'optimisé :
+
+| Variante | 2018→2026 CAGR / DD / Sharpe | En échantillon 2018-2022 | Hors échantillon 2023→ | Ordres/an | Frais |
+|---|---|---|---|---|---|
+| Référence buy & hold PSP5 | +14,7 % / -33,6 % / 0,91 | +11,3 % / -33,6 % / 0,67 | +18,8 % / -23,1 % / 1,33 | 0,1 | 5 € |
+| **12 mois, top 1** (retenu sur 2018-2022) | +13,0 % / -31,5 % / 0,74 | +8,7 % / -29,6 % / 0,52 | +19,1 % / -24,6 % / 1,08 | 5,8 | 370 € |
+| 12 mois, top 2 | +12,3 % / -30,6 % / 0,76 | +7,6 % / -30,6 % / 0,50 | +19,1 % / -25,2 % / 1,19 | 6,0 | 142 € |
+| 6 mois, top 1 | +11,1 % / -28,1 % / 0,66 | +5,4 % / -28,1 % / 0,37 | +18,5 % / -26,5 % / 1,04 | 8,0 | 473 € |
+| 6 mois, top 2 | +6,9 % / -30,5 % / 0,50 | -0,0 % / -30,5 % / 0,08 | +16,6 % / -24,3 % / 1,06 | 9,5 | 166 € |
+
+Honnêtement : **(b) ne bat pas le buy & hold PSP5**, ni sur toute la période
+ni hors échantillon en ajusté du risque (drawdown à peine réduit, Sharpe plus
+faible, ~6 ordres/an à passer à la main). Biais à garder en tête : l'univers
+contient le Nasdaq-100, choisi en sachant qu'il a été le grand gagnant de la
+période ; PAEEM n'a d'historique yfinance que depuis 04/2019. Pas d'actif
+« refuge » PEA satisfaisant en risk-off : les ETF monétaires (CSH, C3M, XEON)
+ne sont pas éligibles et OBLI.PA (Amundi PEA Euro Court Terme) a perdu ~22 %
+en 2021-2022 — la case vide reste donc en cash.
+
+**Recommandation : mode (a).** Ce sont des backtests (une seule trajectoire
+historique, dominée par le marché US 2018-2026) : ils ne garantissent rien,
+et un buy & hold à 100 % actions implique d'accepter des baisses de -30 % ou
+plus sans rien faire.
+
+**Lancer** (créer d'abord le fichier de compte avec le cash réellement
+disponible — hors lignes que le bot ne gère pas) :
+
+```bash
+cp config/config_pea_buyhold.example.yaml config/config_pea_buyhold.yaml
+echo '{"cash": 2306.59, "positions": {}}' > state/manual_account_pea_buyhold.json
+python -m trading_bot backtest --config config/config_pea_buyhold.yaml
+python -m trading_bot paper --config config/config_pea_buyhold.yaml --once   # un cycle, pour voir
+python -m trading_bot paper --config config/config_pea_buyhold.yaml          # 1 cycle / jour de bourse à 18h30
+```
+
+`live.daily_run_after: "18:30"` : un seul cycle par jour de bourse, après la
+clôture d'Euronext (signal sur la clôture du jour, ordre à passer le
+lendemain matin — même convention que le backtest). Exemple de premier push
+(cours du 24/09/2026) :
+
+```
+PEA buy & hold — 1 ordre(s) à passer
+ORDRE : ACHETER 38 PSP5 — ordre au marché (ou à cours limité 59,72 €) · ≈ 2 257,96 € au cours de 59,42 €, frais ≈ 4,52 €
+INFO : Pas de stop à poser sur PSP5 : risk.stop_mode vaut none dans cette config (justification dans ses commentaires et dans le README). Alertes d'information actives (SMA / drawdown).
+```
+
+**Stop Suiveur natif** (`live.manual.native_trailing_stop: true` avec
+`risk.stop_mode: trailing_pct`) : l'écart est figé en % à l'entrée
+(`risk.trailing_stop_pct`, ou `atr_stop_multiple` × ATR / cours), le bot
+demande de poser l'ordre **une seule fois** — « Une fois l'achat exécuté, poser un STOP SUIVEUR : vendre
+38 PSP5, écart 20,0 % (≈ 11,88 €), seuil de départ 47,54 € » — puis ne
+notifie plus rien tant que la position ne change pas (Fortuneo remonte le
+seuil lui-même). Il rejoue les plus hauts/bas yfinance pour détecter un
+déclenchement probable, comptabilise alors la vente et envoie une alerte « à
+vérifier » ; avant toute vente décidée par la stratégie, il demande d'annuler
+le stop. Pas d'ordre Duo/Trio : ces stratégies n'ont pas d'objectif de gain.
+
+#### PEA cœur-satellite : plan passif 55 / 20 / 25, sans signal ni stop
+
+Config : `config/config_pea_core_satellite.example.yaml` (stratégie
+`core_satellite`, logique dans `trading_bot.portfolio.core_satellite`,
+partagée à l'identique par le backtest et le live).
+
+| Poche | ETF (yfinance) | Cible | Rôle |
+|---|---|---|---|
+| Cœur mondial | `DCAM.PA` — Amundi PEA Monde (MSCI World) UCITS ETF | 55 % | diversification mondiale |
+| Cœur US | `PSP5.PA` — Amundi PEA S&P 500 UCITS ETF Acc | 20 % | S&P 500 |
+| Satellite | `CL2.PA` — Amundi MSCI USA Daily (2x) Leveraged UCITS ETF Acc | 25 % | levier x2 quotidien sur les actions US |
+
+**Choix du MSCI World** (vérifié sur yfinance le 24/09/2026) : `DCAM.PA`
+(Amundi, « PEA Monde » dans son nom, ~6,2 € la part, ~960 000 parts/jour
+échangées). Écartés : `CW8.PA` (Amundi MSCI World Swap, ~698 € la part :
+actions entières trop grossières sur 2 000 €), `EWLD.PA` (~41 €, mais
+historique yfinance depuis 03/2024 seulement et ~16 000 parts/jour),
+`WPEA.PA` (iShares, pas Amundi). Limite : DCAM n'a d'historique yfinance
+que depuis le **04/03/2025**. L'éligibilité PEA se déduit du nom des fonds :
+vérifie-la sur la fiche Fortuneo avant d'acheter.
+
+**Règles** (paramètres sous `strategies[0].params`) :
+- **Rien à faire** (aucun push) tant qu'aucune poche ne dérive de plus de
+  `drift_threshold_pts` (5 points) de sa cible. Poids = valeur de la poche /
+  valeur totale, cash compris.
+- **Rééquilibrage annuel** au premier jour de bourse de
+  `annual_rebalance_month` (janvier ; rattrapé si le bot était arrêté ce
+  jour-là). On ne vend rien si l'écart restant est sous
+  `calendar_min_drift_pts` (1 point).
+- **Apports d'abord** : le cash disponible (au-delà d'un coussin de
+  max(10 €, 1 % du cash)) va d'abord aux poches en retard, sans rien vendre.
+  On ne vend les poches en excès que si la dérive dépasse encore le seuil
+  après ces achats.
+- Actions entières, frais Fortuneo, `min_order_value: 150` et
+  `max_fee_pct: 0.02`. Une poche n'est **jamais achetée au-delà de son écart
+  à la cible** (+ 1 action d'arrondi), ni si elle est déjà à sa cible. Parmi
+  toutes les combinaisons d'achats finançables qui respectent ces règles, le
+  bot retient celle qui laisse la plus petite dérive max, puis le plus petit
+  écart total. Un plan qui ne réduit pas la dérive n'est jamais proposé.
+  Si aucun achat valable n'existe (poches en retard de moins de 150 €), le
+  cash attend : un push « cash en attente » l'annonce, une fois par montant.
+  Même logique pour les ventes : sur ~2 300 €, une dérive corrigeable
+  seulement par une vente de moins de 150 € attend le prochain apport.
+- Pas de stop (`risk.stop_mode: none`, imposé dans ce mode). Pas de
+  coupe-circuit.
+
+**Déclarer un apport** : après le virement sur le PEA, ajoute le montant au
+`"cash"` de `state/manual_account_pea_core_satellite.json`. Le bot détecte
+l'écart au cycle suivant (« Apport détecté : +… € ») et pousse les achats
+quand le cash non investi atteint max(`contribution_min_eur` 200 €,
+`contribution_min_pct` 1 % du portefeuille). Sous ce seuil, le cash attend.
+La performance est suivie **par parts** : un apport achète des parts, il ne
+compte pas comme du rendement. C'est la base des alertes de drawdown.
+
+**Lancer** :
+
+```bash
+cp config/config_pea_core_satellite.example.yaml config/config_pea_core_satellite.yaml
+echo '{"cash": 2306.59, "positions": {}}' > state/manual_account_pea_core_satellite.json
+python -m trading_bot paper --config config/config_pea_core_satellite.yaml --once   # un cycle, pour voir
+python -m trading_bot paper --config config/config_pea_core_satellite.yaml          # 1 cycle / jour de bourse à 18h30
+python scripts/pea_core_satellite_compare.py --cache /tmp/cs.pkl                    # tableaux ci-dessous
+```
+
+Premier push réel (`paper --once`, cours du 24/09/2026, 2 306,59 € de cash) :
+
+```
+PEA cœur-satellite — 3 ordre(s) à passer
+INFO : Plan cœur-satellite : apport — 2 283,52 € de cash à investir (seuil 200,00 €), vers les poches en retard, par les achats seulement, aucune vente.
+INFO : Poids : DCAM 0,0 % → 54,2 % (cible 55,0 %) · PSP5 0,0 % → 20,6 % (cible 20,0 %) · CL2 0,0 % → 24,0 % (cible 25,0 %) · cash 2 306,59 € → 27,76 €
+ORDRE : ACHETER 200 DCAM — ordre au marché (ou à cours limité 6,26 €) · ≈ 1 246,60 € au cours de 6,23 €, frais ≈ 1,95 €
+ORDRE : ACHETER 8 PSP5 — ordre au marché (ou à cours limité 59,61 €) · ≈ 474,48 € au cours de 59,31 €, frais ≈ 2,37 €
+ORDRE : ACHETER 17 CL2 — ordre au marché (ou à cours limité 32,60 €) · ≈ 551,48 € au cours de 32,44 €, frais ≈ 1,95 €
+INFO : Pas de stop à poser (DCAM, PSP5, CL2) : risk.stop_mode vaut none dans cette config. Des alertes d'information préviennent en cas de forte baisse, sans jamais vendre.
+```
+
+Dérive max après achat : 1,0 pt. Une part de PSP5 vaut 2,6 % du
+portefeuille, d'où l'arrondi. Avec 20 000 € : 1 748 DCAM, 66 PSP5, 152 CL2
+(54,6 / 19,6 / 24,7 %), 39,48 € de frais, 220 € laissés en coussin. Le cycle
+suivant, sans changement, n'envoie rien.
+
+Apport de 300 € le lendemain (ajouté au cash du fichier de compte) :
+
+```
+PEA cœur-satellite — 1 ordre(s) à passer
+INFO : Apport détecté : +300,00 €. Plan cœur-satellite : apport — 317,76 € de cash à investir (seuil 200,00 €), vers les poches en retard, par les achats seulement, aucune vente.
+INFO : Poids : DCAM 47,9 % → 54,9 % (cible 55,0 %) · PSP5 18,2 % → 18,3 % (cible 20,0 %) · CL2 21,2 % → 21,2 % (cible 25,0 %) · cash 327,76 € → 145,05 €
+ORDRE : ACHETER 29 DCAM — ordre au marché (ou à cours limité 6,26 €) · ≈ 180,76 € au cours de 6,23 €, frais ≈ 1,95 €
+```
+
+PSP5 et CL2 sont en retard de moins de 150 € : un ordre n'y vaudrait pas ses
+frais. Les 145 € restants attendent l'apport suivant (dérive max 3,8 pts,
+dans la bande).
+
+**Alertes d'information** (`live.alerts`, jamais d'ordre, une seule fois par
+palier, réarmées quand la baisse repasse sous la moitié du palier) :
+- portefeuille à -20 / -35 / -50 % de son plus haut (NAV par part, hors
+  apports) : « Ne vends pas, c'est prévu dans le plan », avec le rappel du
+  plan (poches, seuil de dérive, rééquilibrage de janvier) ;
+- CL2 à -30 / -50 % de son plus haut : rappel que le levier x2 amplifie les
+  baisses et que le plan le rachète si son poids passe sous sa cible.
+
+**Résultats** — `python scripts/pea_core_satellite_compare.py`, frais
+Fortuneo, actions entières, ordre exécuté à l'ouverture du lendemain.
+CAGR = rendement par parts (hors effet des apports) ; TRI = rendement
+pondéré par l'argent ; Sharpe sans taux sans risque ; « récup. » = durée
+entre le plus haut et son retour après le pire creux.
+
+*(a) ETF réels, 20/05/2014 → 24/09/2026, 2 306,59 € sans apport.* La poche
+World est CW8.PA remis à l'échelle du cours de DCAM avant le 04/03/2025
+(proxy : même indice, Amundi, EUR). 9 cotations aberrantes de CL2.PA (x300
+un jour sans volume) ont été retirées. Pire creux : février-mars 2020.
+
+| Variante | CAGR | Max DD | Sharpe | Pire 12 mois | Récup. | Ordres/an | Frais |
+|---|---|---|---|---|---|---|---|
+| **Plan 55/20/25** | +16,6 % | -40,8 % | 0,88 | -20,9 % | 0,9 an | 1,9 | 46 € |
+| 0 % levier (73/27) | +13,2 % | -33,6 % | 0,88 | -17,3 % | 0,9 an | 0,5 | 12 € |
+| 50 % levier (37/13/50) | +20,0 % | -47,6 % | 0,87 | -25,3 % | 0,9 an | 2,8 | 69 € |
+| 100 % PSP5 | +15,4 % | -33,7 % | 0,93 | -14,8 % | 0,9 an | 0,1 | 5 € |
+| 100 % World | +12,4 % | -33,6 % | 0,84 | -18,2 % | 0,9 an | 0,1 | 5 € |
+
+*(a) mêmes ETF, 20 000 € + 100 €/mois (34 800 € versés).*
+
+| Variante | CAGR | TRI | Versé → final | Max DD | Ordres/an | Frais |
+|---|---|---|---|---|---|---|
+| **Plan 55/20/25** | +16,8 % | +16,8 % | 34 800 → 180 213 € | -40,7 % | 5,2 | 227 € |
+| 0 % levier | +13,1 % | +13,1 % | 34 800 → 126 424 € | -33,5 % | 3,2 | 114 € |
+| 50 % levier | +20,1 % | +20,0 % | 34 800 → 246 181 € | -47,8 % | 5,1 | 325 € |
+| 100 % PSP5 | +15,3 % | +15,2 % | 34 800 → 155 470 € | -33,5 % | 2,4 | 97 € |
+| 100 % World | +12,3 % | +12,4 % | 34 800 → 117 644 € | -33,5 % | 2,8 | 106 € |
+
+Avec 2 306,59 € + 100 €/mois : plan 17 107 → 58 593 € (TRI +16,4 %),
+100 % PSP5 52 140 €, 100 % World 42 937 €, ~5-7 ordres/an. Sur DCAM réel
+seul (03/2025 → 09/2026, 1,5 an, trop court pour conclure) : plan +17,8 %/an,
+DD -20,5 % ; PSP5 +15,2 %, DD -17,0 %.
+
+*(b) Stress test synthétique, 2 306,59 € + 100 €/mois, 1990 → 2026
+(46 307 € versés).* Pire creux : oct. 2007 → mars 2009 pour toutes les
+variantes.
+
+| Variante | CAGR | TRI | Versé → final | Max DD | Sharpe | Pire 12 mois | Récup. | Ordres/an | Frais |
+|---|---|---|---|---|---|---|---|---|---|
+| **Plan 55/20/25** | +10,9 % | +11,4 % | 46 307 → 689 600 € | -65,1 % | 0,63 | -57,3 % | 5,4 ans | 5,1 | 762 € |
+| 0 % levier | +8,9 % | +9,4 % | 46 307 → 409 971 € | -56,9 % | 0,63 | -49,6 % | 5,4 ans | 3,5 | 262 € |
+| 50 % levier | +12,6 % | +13,0 % | 46 307 → 1 065 519 € | -72,8 % | 0,60 | -65,1 % | 5,6 ans | 5,6 | 1 450 € |
+| 100 % PSP5 | +10,6 % | +10,7 % | 46 307 → 582 903 € | -55,1 % | 0,65 | -47,3 % | 4,9 ans | 3,0 | 224 € |
+| 100 % World | +8,2 % | +8,9 % | 46 307 → 360 398 € | -57,7 % | 0,58 | -50,4 % | 5,5 ans | 3,0 | 221 € |
+
+*(b) Sous-périodes, 20 000 € sans apport* (CAGR / max DD / pire 12 mois) :
+
+| Variante | 2000 → 2012 | 2007 → 2009 |
+|---|---|---|
+| **Plan 55/20/25** | +0,8 % / -65,6 % / -57,9 % — creux non récupéré fin 2012 | -8,9 % / -65,6 % / -57,9 % |
+| 0 % levier | +1,6 % / -57,0 % / -49,7 % | -5,8 % / -57,1 % / -49,7 % |
+| 50 % levier | -0,5 % / -73,3 % / -65,7 % | -12,3 % / -72,8 % / -65,1 % |
+| 100 % PSP5 | +1,6 % / -55,2 % / -47,5 % — récupéré en 4,9 ans | -5,8 % / -55,2 % / -47,5 % |
+| 100 % World | +1,6 % / -57,9 % / -50,5 % | -5,9 % / -57,8 % / -50,5 % |
+
+Construction synthétique : S&P 500 = `^SP500TR` - 0,15 %/an de frais ;
+levier x2 = 2 × r(`^SP500TR`) - (`^IRX`/100 + 0,6 %)/252 par jour ; World =
+`^990100-USD-STRD` (indice MSCI World **prix**, depuis 1985) + 2,3 %/an de
+dividendes - 0,20 %/an de frais. Les 2,3 % sont l'écart mesuré entre URTH
+(dividendes réinvestis) et cet indice sur 2012-2026. Chaque série démarre à
+un cours réaliste (6 / 60 / 30) pour garder la granularité des actions
+entières. Calendrier NYSE, **USD, change ignoré**.
+
+**Lecture honnête** :
+- Sur 2014-2026, le levier a payé (+1,2 pt/an contre 100 % PSP5), mais pas
+  gratuitement : drawdown -41 % contre -34 %, Sharpe plus bas (0,88 contre
+  0,93). C'est une seule trajectoire, celle d'un marché US exceptionnel, et
+  on le sait après coup : la poche à 25 % est un pari sur sa poursuite.
+- Sur 36 ans synthétiques, le plan ne bat 100 % PSP5 que de ~0,3 pt/an. Il
+  prend en échange 10 points de drawdown en plus (-65 % contre -55 %) et un
+  pire 12 mois à -57 %. Le Sharpe est identique à la variante sans levier :
+  CL2 ajoute du risque au moins autant que du rendement. En cause, la
+  réinitialisation quotidienne (perte à la volatilité) et le coût d'emprunt
+  (taux court + 0,6 %).
+- Sur 2000-2012, **le plan est le pire des variantes sans levier** (+0,8 %/an
+  contre +1,6 %) et son creux de 2007-2009 n'est toujours pas récupéré fin
+  2012. À 50 % de levier, on perd de l'argent sur 13 ans.
+- En 2007-2009, attends-toi à voir le portefeuille divisé par ~3 (-65 %) et
+  CL2 par ~6 (-84 % en synthétique). Le plan ne vend pas : il rachète CL2 au rééquilibrage.
+  C'est ce qui a permis de récupérer en ~5,5 ans sur 1990-2026, mais il faut
+  tenir.
+- Le World a fait moins bien que le S&P sur toutes les périodes (Japon des
+  années 90, domination US depuis). La poche de 55 % sert à diversifier,
+  pas à gagner le backtest.
+- Si -60 % ne te paraît pas tenable sans vendre, une poche CL2 à 0-15 % a
+  historiquement coûté peu en rendement ajusté du risque.
+
+**Limites** : backtests (biais rétrospectif, une seule histoire) ; levier
+synthétique (écart de suivi, frais et coût d'emprunt réels de CL2 non
+modélisés au-delà de 0,6 %/an) ; change EUR/USD ignoré dans le stress test
+(les ETF réels en EUR l'incluent) ; dividendes du World approximés par une
+constante ; World réel = proxy CW8 avant 03/2025 ; promo Fortuneo sur les
+ETF Amundi non modélisée ; fiscalité ignorée (PEA) ; ordres exécutés à
+l'ouverture du lendemain au cours d'ouverture (le vrai cours du matin peut
+différer, d'où le coussin de cash).
+
 ### Reprise après coupe-circuit de drawdown
 
 Si le coupe-circuit de drawdown (`risk.max_drawdown_pct`) se déclenche, le bot
@@ -418,7 +742,8 @@ pytest
 Les tests unitaires utilisent des données synthétiques (aucun accès réseau
 requis) et couvrent les indicateurs, les stratégies, l'allocateur
 multi-stratégies, la gestion du risque, le stop suiveur, les coupe-circuits,
-le calendrier de marché, la persistance d'état et le moteur de backtest.
+le calendrier de marché, la persistance d'état, le moteur de backtest et le
+mode PEA cœur-satellite (dérive, apports, rééquilibrage annuel, alertes).
 
 ## Architecture
 
@@ -435,13 +760,16 @@ src/trading_bot/
     base.py              # classe abstraite Strategy
     sma_crossover.py, rsi_mean_reversion.py, momentum_breakout.py
     relative_strength.py  # rotation sectorielle / force relative (cross-sectionnelle)
+    buy_and_hold.py        # toujours investi (mode PEA buy & hold)
+    dual_momentum.py        # rotation mensuelle momentum relatif + absolu (mode PEA ETF)
     defensive_rotation.py # rotation vers un actif défensif (cross-sectionnelle)
     bollinger_scalping.py  # retour à la moyenne intraday (scalping)
     registry.py           # fabrique de stratégies à partir de la config
   portfolio/
     allocator.py          # combine les signaux de plusieurs stratégies
     risk.py                # dimensionnement des positions + caps de risque
-    stops.py                # stop-loss suiveur ATR (logique pure)
+    stops.py                # stop-loss suiveur ATR / en % "Stop Suiveur natif" (logique pure)
+    fees.py                  # barème de frais par paliers, actions entières, garde-fous d'ordres
     circuit_breaker.py        # coupe-circuits perte journalière / drawdown
     regime.py                  # filtre de régime de marché (SMA du benchmark)
     universe_rotation.py         # rotation périodique de l'univers tradé, par stratégie

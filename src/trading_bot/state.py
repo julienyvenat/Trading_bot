@@ -23,6 +23,18 @@ Quatre choses doivent survivre à un redémarrage du bot :
     `trading_bot.portfolio.symbol_track_record` — sans ce point de
     comparaison persistant, un redémarrage du bot ferait perdre la trace du
     prix d'entrée des positions closes pendant l'interruption.
+
+Pour le mode PEA manuel (`live.manual.native_trailing_stop`, alertes,
+`live.daily_run_after`), s'y ajoutent : les Stops Suiveurs natifs posés chez
+le courtier (écart figé, plus haut de référence, quantité, dernière bougie
+examinée), les symboles sortis sur stop en attente de ré-entrée, l'état des
+alertes d'information (pour ne notifier qu'au franchissement) et la date du
+dernier cycle quotidien.
+
+Mode `core_satellite` : `core_satellite` garde la comptabilité par parts
+(NAV hors apports, plus haut, dernier cash/quantités vus pour détecter un
+apport), l'année du dernier rééquilibrage calendaire et les plus hauts des
+poches suivies par les alertes de baisse.
 """
 
 from __future__ import annotations
@@ -52,6 +64,14 @@ class LiveState:
     stop_order_dates: dict[str, str] = field(default_factory=dict)
     risk_state: RiskState | None = None
     last_known_positions: dict[str, PositionSnapshot] = field(default_factory=dict)
+    # {symbole: {"trail_pct", "high_water", "qty", "last_date"}} : Stop
+    # Suiveur natif que l'utilisateur a été invité à poser chez le courtier.
+    native_stops: dict[str, dict] = field(default_factory=dict)
+    # {symbole: date ISO de la sortie sur stop} (voir `risk.stop_reentry`).
+    stopped_out: dict[str, str] = field(default_factory=dict)
+    alert_flags: dict[str, bool] = field(default_factory=dict)
+    last_daily_run: str | None = None
+    core_satellite: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +83,11 @@ class LiveState:
             "stop_order_dates": dict(self.stop_order_dates),
             "risk_state": self.risk_state.to_dict() if self.risk_state else None,
             "last_known_positions": {symbol: snap.to_dict() for symbol, snap in self.last_known_positions.items()},
+            "native_stops": {symbol: dict(v) for symbol, v in self.native_stops.items()},
+            "stopped_out": dict(self.stopped_out),
+            "alert_flags": dict(self.alert_flags),
+            "last_daily_run": self.last_daily_run,
+            "core_satellite": json.loads(json.dumps(self.core_satellite)),
         }
 
     @classmethod
@@ -83,6 +108,11 @@ class LiveState:
             stop_order_dates=stop_order_dates,
             risk_state=risk_state,
             last_known_positions=last_known_positions,
+            native_stops={symbol: dict(v) for symbol, v in data.get("native_stops", {}).items()},
+            stopped_out=dict(data.get("stopped_out", {})),
+            alert_flags=dict(data.get("alert_flags", {})),
+            last_daily_run=data.get("last_daily_run"),
+            core_satellite=dict(data.get("core_satellite", {}) or {}),
         )
 
 
