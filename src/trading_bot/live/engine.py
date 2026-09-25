@@ -207,6 +207,7 @@ def build_broker(config: AppConfig) -> Broker:
             calendar_name=config.market.calendar,
             commission=CommissionModel.from_backtest_config(config.backtest),
             limit_offset_pct=config.live.manual.limit_offset_pct,
+            managed_symbols=list(config.symbols) if core_satellite_params(config) is not None else None,
         )
     if config.live.broker != "alpaca":
         raise ValueError(f"`live.broker` inconnu '{config.live.broker}'. Valeurs supportées : 'alpaca', 'manual'.")
@@ -607,7 +608,8 @@ def run_once(config: AppConfig, broker: Broker, dry_run: bool, state: LiveState)
     # liquider et elles restent orphelines indéfiniment, sans stop suiveur.
     orphan_symbols = set(current_qty) - set(config.symbols)
     if orphan_symbols and core_satellite is not None:
-        logger.warning(
+        # Attendu (ex. AXA gardées à côté du plan) : une ligne d'info par cycle.
+        logger.info(
             "Position(s) hors des poches du plan cœur-satellite : %s. Ignorée(s) : ni comptée(s) dans les "
             "poids, ni vendue(s).",
             ", ".join(sorted(orphan_symbols)),

@@ -401,6 +401,80 @@ def test_live_orphan_positions_are_ignored(live):
     assert json.loads(account.read_text())["positions"]["MC.PA"]["qty"] == 2
 
 
+AXA = "CS.PA"
+
+
+def _run_scenario(live, axa_prices):
+    """Même suite de cycles du soir, avec ou sans 24 AXA hors plan dans le
+    fichier de compte. `axa_prices` : cours d'AXA à chaque cycle (None = pas
+    d'AXA dans le compte ; valeur None = cours indisponible ce cycle)."""
+    config, account, set_prices = live
+    positions = {} if axa_prices is None else {AXA: {"qty": 24, "avg_entry_price": 20.242}}
+    account.write_text(json.dumps({"cash": 2306.59, "positions": positions}))
+    broker = engine_module.build_broker(config)
+    notifier = _Notifier()
+    state = LiveState()
+    steps = [
+        (dict(PRICES), None),  # 1er cycle : apport initial investi
+        (dict(PRICES), 1000.0),  # virement de 1 000 €
+        ({s: p * 0.7 for s, p in PRICES.items()}, None),  # krach -30 % : palier de drawdown
+        ({s: p * 0.7 for s, p in PRICES.items()}, None),  # même niveau : rien de nouveau
+        ({s: p * 0.6 for s, p in PRICES.items()}, None),  # -40 % : palier -35 %
+    ]
+    for i, (prices, contribution) in enumerate(steps):
+        set_prices(prices)
+        if axa_prices is not None and axa_prices[i] is not None:
+            _Prices.current[AXA] = axa_prices[i]
+        if contribution:
+            data = json.loads(account.read_text())
+            data["cash"] += contribution
+            account.write_text(json.dumps(data))
+        state = _cycle(config, broker, state, notifier)
+    data = json.loads(account.read_text())
+    return {
+        "pushes": notifier.sent,
+        "cash": data["cash"],
+        "sleeves": {s: p for s, p in data["positions"].items() if s != AXA},
+        "axa": data["positions"].get(AXA),
+        "core_satellite": state.core_satellite,
+        "alert_flags": state.alert_flags,
+    }
+
+
+def test_live_off_plan_axa_does_not_change_plan_decisions(live, caplog):
+    """24 AXA hors plan, dont le cours fait n'importe quoi (x2, -60 %, cours
+    indisponible) : ordres, pushes, détection d'apport, NAV par part et
+    alertes de drawdown strictement identiques au même compte sans AXA ;
+    AXA jamais vendue ni rachetée ; pas d'avertissement quotidien."""
+    reference = _run_scenario(live, None)
+    assert reference["alert_flags"]["plan_drawdown:0.2"] and reference["alert_flags"]["plan_drawdown:0.35"]
+    for axa_prices in ([43.77, 87.54, 17.5, 43.77, 43.77], [43.77, None, None, 60.0, None], [None] * 5):
+        caplog.clear()
+        with caplog.at_level("INFO", logger="trading_bot"):
+            result = _run_scenario(live, axa_prices)
+        assert result["axa"] == {"qty": 24, "avg_entry_price": 20.242}
+        assert {k: v for k, v in result.items() if k != "axa"} == {k: v for k, v in reference.items() if k != "axa"}
+        assert not any("CS" in text and ("VENDRE" in text or "ACHETER" in text) for _, m in result["pushes"] for text in [m])
+        assert not [r for r in caplog.records if r.levelname == "WARNING" and "CS.PA" in r.getMessage()]
+        assert sum("hors des poches du plan" in r.getMessage() for r in caplog.records) == 5  # une ligne d'info par cycle
+
+
+def test_live_off_plan_axa_crash_alone_triggers_no_plan_alert(live):
+    config, account, set_prices = live
+    account.write_text(json.dumps({"cash": 2306.59, "positions": {AXA: {"qty": 24, "avg_entry_price": 20.242}}}))
+    _Prices.current[AXA] = 43.77
+    broker = engine_module.build_broker(config)
+    notifier = _Notifier()
+    state = _cycle(config, broker, LiveState(), notifier)
+    pushes = len(notifier.sent)
+    set_prices(dict(PRICES))
+    _Prices.current[AXA] = 10.0  # AXA -77 %, plan inchangé
+    state = _cycle(config, broker, state, notifier)
+    assert len(notifier.sent) == pushes  # ni alerte, ni faux retrait, ni ordre
+    assert not any(state.alert_flags.get(f"plan_drawdown:{lv:g}") for lv in config.live.alerts.drawdown_levels)
+    assert state.core_satellite["nav"] == pytest.approx(1.0, abs=0.01)
+
+
 def test_live_rejects_stops_in_core_satellite(live):
     config, account, set_prices = live
     config.risk = replace(config.risk, stop_mode="atr")

@@ -89,6 +89,7 @@ class ManualBroker(Broker):
         calendar_name: str = "XPAR",
         commission: CommissionModel | None = None,
         limit_offset_pct: float = 0.005,
+        managed_symbols: list[str] | None = None,
     ) -> None:
         self._path = Path(account_file)
         if not self._path.exists():
@@ -102,6 +103,11 @@ class ManualBroker(Broker):
         self._pending_instructions: list[ManualInstruction] = []
         self._commission = commission or CommissionModel()
         self._limit_offset_pct = limit_offset_pct
+        # Renseigné (mode core_satellite) : une position HORS de ces symboles
+        # (ex. 24 AXA gardées à côté du plan) n'est jamais traitée par le bot ;
+        # si son cours est indisponible, elle est valorisée à son PRU plutôt
+        # que de faire échouer tout le cycle du plan.
+        self._managed_symbols = set(managed_symbols) if managed_symbols is not None else None
 
     def add_note(self, text: str, kind: str = "info") -> None:
         """Ajoute une ligne d'information (ou d'alerte) au récapitulatif du
@@ -130,11 +136,24 @@ class ManualBroker(Broker):
         with open(self._path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
+    def _valuation_price(self, symbol: str, pos: dict) -> float:
+        """Cours de valorisation d'une position du fichier de compte (voir
+        `managed_symbols` pour le repli au PRU des positions non gérées)."""
+        if self._managed_symbols is None or symbol in self._managed_symbols:
+            return self.get_last_price(symbol)
+        try:
+            price = self.get_last_price(symbol)
+            if math.isfinite(price) and price > 0:
+                return price
+        except Exception as exc:  # noqa: BLE001 - position hors plan : jamais bloquante
+            logger.info("Cours de %s (hors plan) indisponible (%s) : valorisée à son PRU.", symbol, exc)
+        return float(pos.get("avg_entry_price", 0.0))
+
     def get_account(self) -> AccountInfo:
         data = self._load()
         cash = float(data.get("cash", 0.0))
         positions_value = sum(
-            float(pos["qty"]) * self.get_last_price(symbol) for symbol, pos in data.get("positions", {}).items()
+            float(pos["qty"]) * self._valuation_price(symbol, pos) for symbol, pos in data.get("positions", {}).items()
         )
         equity = cash + positions_value
         # Pas de marge sur un PEA : le pouvoir d'achat se limite au cash disponible.
@@ -145,7 +164,7 @@ class ManualBroker(Broker):
         positions: dict[str, Position] = {}
         for symbol, pos in data.get("positions", {}).items():
             qty = float(pos["qty"])
-            price = self.get_last_price(symbol)
+            price = self._valuation_price(symbol, pos)
             positions[symbol] = Position(
                 symbol=symbol, qty=qty, market_value=qty * price, avg_entry_price=float(pos["avg_entry_price"])
             )

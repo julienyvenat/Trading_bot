@@ -263,7 +263,7 @@ def test_brief_content_without_pending_orders(setup):
     assert brief.message.split("\n") == [
         "Valeur à la clôture du 24/09 : 2 257,61 € (+29,20 €, +1,3 % sur la veille).",
         "Perf. à positions actuelles : sept. +10,3 % · 2026 +21,0 %.",
-        "Poids : DCAM 78,9 % (cible 80,0 %) · PSP5 18,6 % (cible 20,0 %). Dérive max 1,4 pts (seuil 5) : dans la bande.",
+        "Poids du plan : DCAM 78,9 % (cible 80,0 %) · PSP5 18,6 % (cible 20,0 %). Dérive max 1,4 pts (seuil 5) : dans la bande.",
         "Aucun ordre à passer aujourd'hui.",
         "Cash non investi : 56,41 € — sous le seuil d'apport (200,00 €) : il attend le prochain versement.",
         "Marchés : S&P 500 -0,3 % · MSCI World -0,1 % · futures S&P +0,1 % · EUR/USD 1,1374 (-0,1 %).",
@@ -305,6 +305,7 @@ def test_brief_cash_only_account_above_threshold(setup):
     assert lines[0] == "Valeur à la clôture du 24/09 : 2 306,59 € (cash seul)."
     assert "Cash non investi : 2 306,59 € — au-dessus du seuil d'apport (200,00 €) : investi au prochain cycle." in lines
     assert not any(line.startswith("Poids") for line in lines)
+    assert not any("Hors plan" in line or "Valeur totale" in line for line in lines)
 
 
 def test_brief_drift_above_threshold(setup):
@@ -362,6 +363,119 @@ def test_fetch_quote_changes_omits_failing_symbols(monkeypatch):
     quotes = mb.fetch_quote_changes(["^GSPC", "URTH", "ES=F", "EURUSD=X"])
     assert set(quotes) == {"^GSPC", "EURUSD=X"}
     assert quotes["^GSPC"] == (101.0, pytest.approx(0.01))
+
+
+# --- Positions hors plan (24 AXA gardées à côté du plan) ------------------------------------
+
+AXA = "CS.PA"
+AXA_POSITION = {"qty": 24, "avg_entry_price": 20.242}
+
+
+def _axa_bars(last_day: str = "2026-09-24", prev: float = 43.90, last: float = 43.77) -> pd.DataFrame:
+    index = pd.bdate_range("2026-09-01", last_day)
+    s = pd.Series([prev] * (len(index) - 1) + [last], index=index, dtype=float)
+    return pd.DataFrame({"open": s, "high": s, "low": s, "close": s, "volume": 1})
+
+
+def _with_axa(account, cash=None):
+    data = json.loads(json.dumps(ACCOUNT)) if cash is None else {"cash": cash, "positions": {}}
+    data["positions"][AXA] = dict(AXA_POSITION)
+    account.write_text(json.dumps(data))
+
+
+def _fetch_with_axa(axa=None, fail_axa=False):
+    calls = []
+
+    def fetch(config, symbols):
+        calls.append(list(symbols))
+        if AXA in symbols:
+            if fail_axa:
+                raise RuntimeError("yfinance down pour CS.PA")
+            return {AXA: _axa_bars() if axa is None else axa}
+        return _bars()
+
+    return fetch, calls
+
+
+def _brief_axa(config, state=None, quotes=None, **kwargs):
+    fetch, calls = _fetch_with_axa(**kwargs)
+    brief = mb.build_morning_brief(
+        config, state or LiveState(), now=FRIDAY_0830, fetch_bars=fetch, fetch_quotes=lambda s: dict(quotes or {})
+    )
+    return brief, calls
+
+
+def test_brief_shows_off_plan_axa_and_total_pea_value(setup):
+    config, account = setup
+    _with_axa(account)
+    state = LiveState(last_daily_run="2026-09-24", last_cycle_orders={"session": "2026-09-24", "orders": []})
+    brief, calls = _brief_axa(config, state, quotes=QUOTES)
+    assert calls == [[DCAM, PSP5], [AXA]]  # poches seules d'abord : AXA n'entre pas dans les calculs du plan
+    assert brief.message.split("\n") == [
+        "Valeur du plan à la clôture du 24/09 : 2 257,61 € (+29,20 €, +1,3 % sur la veille).",
+        "Perf. à positions actuelles : sept. +10,3 % · 2026 +21,0 %.",
+        "Hors plan : 24 AXA (CS.PA) ≈ 1 050,48 € (+116,2 % vs PRU 20,24 €, -0,3 % veille).",
+        "Valeur totale du PEA : 3 308,09 €.",
+        # Poids, dérive et cash : strictement identiques à l'aperçu sans AXA.
+        "Poids du plan : DCAM 78,9 % (cible 80,0 %) · PSP5 18,6 % (cible 20,0 %). Dérive max 1,4 pts (seuil 5) : dans la bande.",
+        "Aucun ordre à passer aujourd'hui.",
+        "Cash non investi : 56,41 € — sous le seuil d'apport (200,00 €) : il attend le prochain versement.",
+        "Marchés : S&P 500 -0,3 % · MSCI World -0,1 % · futures S&P +0,1 % · EUR/USD 1,1374 (-0,1 %).",
+    ]
+    assert len(brief.message) <= 1024
+
+
+def test_brief_off_plan_label_falls_back_to_ticker(setup):
+    config, account = setup
+    config.live = replace(config.live, morning_brief=replace(config.live.morning_brief, labels={}))
+    _with_axa(account)
+    assert "Hors plan : 24 CS (CS.PA) ≈ 1 050,48 €" in _brief_axa(config)[0].message
+
+
+def test_brief_off_plan_price_failure_is_graceful(setup):
+    config, account = setup
+    plan_lines = [line for line in _brief(config).message.split("\n") if line.startswith(("Poids", "Cash"))]
+    _with_axa(account)
+    lines = _brief_axa(config, fail_axa=True)[0].message.split("\n")
+    assert "Hors plan : 24 AXA (CS.PA), cours indisponible." in lines
+    assert not any(line.startswith("Valeur totale") for line in lines)  # jamais de total partiel
+    assert lines[0].startswith("Valeur du plan à la clôture du 24/09 : 2 257,61 €")
+    assert [line for line in lines if line.startswith(("Poids", "Cash"))] == plan_lines
+    # Clôture NaN / bougie du jour en cours : dernière clôture valide, jamais NaN.
+    axa = _axa_bars("2026-09-25")
+    axa.loc[pd.Timestamp("2026-09-24"), "close"] = float("nan")
+    message = _brief_axa(config, axa=axa)[0].message
+    assert "Hors plan : 24 AXA (CS.PA) ≈ 1 053,60 € (+116,9 % vs PRU 20,24 €, +0,0 % veille)." in message
+    assert "nan" not in message.lower()
+    # Aucune clôture exploitable : même repli.
+    axa = _axa_bars()
+    axa["close"] = float("nan")
+    assert "Hors plan : 24 AXA (CS.PA), cours indisponible." in _brief_axa(config, axa=axa)[0].message
+
+
+def test_brief_off_plan_with_cash_only_plan(setup):
+    """Le compte réel aujourd'hui : 2 306,59 € de cash + 24 AXA."""
+    config, account = setup
+    _with_axa(account, cash=2306.59)
+    lines = _brief_axa(config)[0].message.split("\n")
+    assert lines[:3] == [
+        "Valeur du plan à la clôture du 24/09 : 2 306,59 € (cash seul).",
+        "Hors plan : 24 AXA (CS.PA) ≈ 1 050,48 € (+116,2 % vs PRU 20,24 €, -0,3 % veille).",
+        "Valeur totale du PEA : 3 357,07 €.",
+    ]
+    # Le seuil d'apport reste calculé sur le plan seul.
+    assert "Cash non investi : 2 306,59 € — au-dessus du seuil d'apport (200,00 €) : investi au prochain cycle." in lines
+
+
+def test_brief_with_off_plan_is_read_only_and_under_limit(setup):
+    config, account = setup
+    _with_axa(account)
+    state = LiveState(last_daily_run="2026-09-24", last_cycle_orders={"session": "2026-09-24", "orders": [ORDER_TEXT] * 30})
+    dict_before, account_before = json.dumps(state.to_dict(), sort_keys=True), account.read_bytes()
+    message = _brief_axa(config, state, quotes=QUOTES)[0].message
+    assert len(message) <= 1024 and "Valeur totale du PEA" in message
+    assert account.read_bytes() == account_before
+    assert json.dumps(state.to_dict(), sort_keys=True) == dict_before
 
 
 def test_brief_active_drawdown_alert_is_calm_and_read_only(setup):
@@ -425,13 +539,14 @@ def test_brief_title_override_and_refused_outside_core_satellite(setup):
 
 def test_morning_brief_config_defaults_and_shipped_configs():
     assert MorningBriefConfig() == MorningBriefConfig(
-        enabled=False, at="08:30", only_trading_days=True, priority=-1, title=None, catch_up_until="12:00"
+        enabled=False, at="08:30", only_trading_days=True, priority=-1, title=None, catch_up_until="12:00", labels={}
     )
     for path in sorted((ROOT / "config").glob("*.yaml")):
         config = load_config(path)
         assert config.live.morning_brief.enabled == (path.name == "config_pea_fortuneo_80_20.yaml"), path.name
     brief = load_config(CONFIG_80_20).live.morning_brief
     assert (brief.at, brief.priority, brief.only_trading_days) == ("08:30", -1, True)
+    assert brief.labels == {"CS.PA": "AXA"}
 
 
 def test_old_state_file_without_morning_brief_fields_loads(tmp_path):

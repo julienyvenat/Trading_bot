@@ -17,8 +17,11 @@
 # la promo Fortuneo de remboursement des frais d'achat sur les ETF Amundi),
 # puis un versement mensuel. APRÈS CHAQUE VIREMENT sur le PEA, ajoute le
 # montant au "cash" de `live.manual.account_file` : le cycle du soir pousse
-# les achats à passer. Les 24 AXA détenues à côté ne figurent PAS dans ce
-# fichier : le bot ne les gère pas.
+# les achats à passer. Les 24 AXA détenues à côté figurent dans ce fichier
+# ("CS.PA": {"qty": 24, "avg_entry_price": 20.242}) pour refléter le PEA réel,
+# mais restent HORS PLAN : jamais achetées, vendues ni rééquilibrées, ni
+# comptées dans les poids, la dérive, les apports ou les alertes de drawdown.
+# L'aperçu du matin les affiche à part, avec la valeur totale du PEA.
 #
 # Lancer :
 #   python -m trading_bot paper --config config/config_pea_fortuneo_80_20.yaml --once   # un cycle, pour voir
@@ -129,6 +132,8 @@ live:
     only_trading_days: true
     priority: -1 # silencieux
     catch_up_until: "12:00" # bot redémarré après 08:30 : aperçu envoyé jusqu'à midi, sauté au-delà
+    labels: # nom court des positions hors plan dans l'aperçu (défaut : ticker sans ".PA")
+      CS.PA: AXA
 
 optimization:
   metric: sharpe_ratio

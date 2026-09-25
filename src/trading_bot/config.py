@@ -298,6 +298,9 @@ class MorningBriefConfig:
     # Bot (re)démarré après `at` sans aperçu envoyé ce jour-là : envoyé tout
     # de suite s'il est encore avant cette heure locale, sinon sauté.
     catch_up_until: str = "12:00"
+    # Libellés courts des positions hors plan (ex. {"CS.PA": "AXA"}), affichés
+    # dans l'aperçu ; à défaut, le ticker sans suffixe de place ("CS").
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
