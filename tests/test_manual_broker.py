@@ -166,3 +166,23 @@ def test_is_market_open_uses_euronext_paris_calendar_by_default(tmp_path, monkey
     broker = ManualBroker(str(account_file))
     assert broker.is_market_open() is True
     assert seen_calendar_names == ["XPAR"]
+
+
+def test_unmanaged_position_without_price_is_valued_at_entry_price(tmp_path, monkeypatch):
+    """Mode core_satellite : une position hors plan (ex. AXA) sans cours ne
+    fait pas échouer le cycle, elle est valorisée à son PRU ; une poche du
+    plan sans cours échoue toujours (jamais de prix inventé pour un ordre)."""
+    monkeypatch.setattr("yfinance.Ticker", _FakeTicker)
+    account_file = tmp_path / "account.json"
+    positions = {"MC.PA": {"qty": 2, "avg_entry_price": 750.0}, "CS.PA": {"qty": 24, "avg_entry_price": 20.242}}
+    _write_account(account_file, cash=100.0, positions=positions)
+
+    broker = ManualBroker(str(account_file), managed_symbols=["MC.PA"])
+    assert broker.get_positions()["CS.PA"].market_value == pytest.approx(24 * 20.242)
+    assert broker.get_account().equity == pytest.approx(100.0 + 2 * 780.0 + 24 * 20.242)
+
+    # Sans `managed_symbols` (autres modes) ou pour une poche gérée : inchangé, l'erreur remonte.
+    with pytest.raises(KeyError):
+        ManualBroker(str(account_file)).get_account()
+    with pytest.raises(KeyError):
+        ManualBroker(str(account_file), managed_symbols=["MC.PA", "CS.PA"]).get_positions()

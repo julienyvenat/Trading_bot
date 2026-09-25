@@ -6,7 +6,11 @@ Contenu (moins de 1 024 caractères, voir `build_morning_brief`) :
     sur la veille, depuis le début du mois et de l'année — calculées à
     positions ACTUELLES sur l'historique de cours (pas d'historique de valeur
     à tenir, et les apports ne faussent pas la variation) ;
-  - poids de chaque poche contre sa cible, dérive max contre le seuil ;
+  - positions hors plan du fichier de compte (ex. 24 AXA gardées à côté) :
+    valeur à la dernière clôture, plus-value contre le PRU, variation sur la
+    veille, puis valeur totale du PEA (plan + hors plan). Elles n'entrent
+    JAMAIS dans les poids, la dérive ni le cash à investir ;
+  - poids de chaque poche du plan contre sa cible, dérive max contre le seuil ;
   - rappel des ordres poussés par le cycle de la veille au soir
     (`state.last_cycle_orders`), à passer aujourd'hui ;
   - cash non investi et ce qu'il attend (seuil d'apport) ;
@@ -215,11 +219,11 @@ def _next_trading_day(calendar: MarketCalendar, day: dt.date) -> dt.date | None:
     return days[0].date() if len(days) else None
 
 
-def _value_lines(frame: pd.DataFrame, qty: dict[str, float], cash: float) -> list[str]:
+def _value_lines(frame: pd.DataFrame, qty: dict[str, float], cash: float, label: str = "Valeur") -> list[str]:
     values = cash + (frame * pd.Series(qty)).sum(axis=1)
     last_date = frame.index[-1]
     last = float(values.iloc[-1])
-    line = f"Valeur à la clôture du {_date_fr(last_date)} : {fmt_eur(last)}"
+    line = f"{label} à la clôture du {_date_fr(last_date)} : {fmt_eur(last)}"
     invested = any(q > 0 for q in qty.values())
     if not invested:
         return [line + " (cash seul)."]
@@ -252,7 +256,7 @@ def _weights_and_cash_lines(
         )
         drift = max_drift_pts(weights, params.targets)
         verdict = "dans la bande" if drift <= params.drift_threshold_pts + 1e-9 else "rééquilibrage au prochain cycle"
-        lines.append(f"Poids : {sleeves}. Dérive max {_pts(drift)} (seuil {params.drift_threshold_pts:g}) : {verdict}.")
+        lines.append(f"Poids du plan : {sleeves}. Dérive max {_pts(drift)} (seuil {params.drift_threshold_pts:g}) : {verdict}.")
     # `plan_rebalance` est pure : on s'en sert pour dire ce que le cash attend.
     rules = ExecutionRules.from_backtest_config(config.backtest)
     plan = plan_rebalance(qty, prices, cash, params, rules)
@@ -266,6 +270,47 @@ def _weights_and_cash_lines(
         status = f"sous le seuil d'apport ({fmt_eur(threshold)}) : il attend le prochain versement"
     lines.append(f"Cash non investi : {fmt_eur(cash)} — {status}.")
     return lines
+
+
+def _fmt_qty(qty: float) -> str:
+    return f"{qty:g}".replace(".", ",")
+
+
+def _off_plan_lines(
+    config: AppConfig,
+    positions: dict,
+    off_plan: list[str],
+    bars: dict[str, pd.DataFrame],
+    calendar: MarketCalendar,
+    now: pd.Timestamp,
+) -> tuple[list[str], float | None]:
+    """Une ligne par position hors plan, valorisée à sa dernière clôture
+    valide (bougie du jour en cours et clôtures NaN exclues). Renvoie aussi
+    leur valeur totale, None si l'une d'elles n'a pas pu être valorisée."""
+    labels = config.live.morning_brief.labels or {}
+    lines, total = [], 0.0
+    for symbol in off_plan:
+        pos = positions.get(symbol) or {}
+        qty = float(pos.get("qty", 0.0))
+        name = f"{_fmt_qty(qty)} {labels.get(symbol) or broker_ticker(symbol)} ({symbol})"
+        frame = _close_frame(bars, [symbol], calendar, now)
+        if frame is None:
+            lines.append(f"Hors plan : {name}, cours indisponible.")
+            total = None
+            continue
+        closes = frame[symbol]
+        last = float(closes.iloc[-1])
+        value = qty * last
+        details = []
+        pru = float(pos.get("avg_entry_price", 0.0) or 0.0)
+        if math.isfinite(pru) and pru > 0:
+            details.append(f"{_signed_pct(last / pru - 1)} vs PRU {fmt_eur(pru)}")
+        if len(closes) >= 2:
+            details.append(f"{_signed_pct(last / float(closes.iloc[-2]) - 1)} veille")
+        lines.append(f"Hors plan : {name} ≈ {fmt_eur(value)}" + (f" ({', '.join(details)})" if details else "") + ".")
+        if total is not None:
+            total += value
+    return lines, total
 
 
 def _orders_lines(state: LiveState, calendar: MarketCalendar, today: dt.date, trading_today: bool) -> list[str]:
@@ -346,6 +391,11 @@ def build_morning_brief(
     positions = account.get("positions", {}) or {}
     sleeves = list(params.targets)
     qty = {s: float((positions.get(s) or {}).get("qty", 0.0)) for s in sleeves}
+    # Positions hors plan (jamais achetées, vendues ni rééquilibrées par le bot) :
+    # affichées à part, jamais comptées dans les poids ni le cash à investir.
+    off_plan = [
+        s for s, p in positions.items() if s not in params.targets and float((p or {}).get("qty", 0.0) or 0.0) != 0
+    ]
 
     lines: list[str] = []
     if not trading_today:
@@ -360,17 +410,29 @@ def build_morning_brief(
         frame = _close_frame(fetch_bars(config, sleeves) or {}, sleeves, calendar, now)
     except Exception as exc:  # noqa: BLE001 - un aperçu ne doit jamais planter
         logger.warning("Aperçu du matin : cours des poches indisponibles (%s).", exc)
+    off_plan_bars: dict[str, pd.DataFrame] = {}
+    if off_plan:
+        try:
+            off_plan_bars = fetch_bars(config, off_plan) or {}
+        except Exception as exc:  # noqa: BLE001 - hors plan : jamais bloquant
+            logger.info("Aperçu du matin : cours hors plan indisponibles (%s).", exc)
+    off_lines, off_total = _off_plan_lines(config, positions, off_plan, off_plan_bars, calendar, now)
     if frame is not None:
         prices = {s: float(frame[s].iloc[-1]) for s in sleeves}
-        lines += _value_lines(frame, qty, cash)
+        lines += _value_lines(frame, qty, cash, label="Valeur du plan" if off_plan else "Valeur")
         session = calendar.session_for(now)
         closed_today = session is not None and now >= session[1]
         expected = today if closed_today else _previous_trading_day(calendar, today)
         if expected is not None and frame.index[-1].date() < expected:
             lines.append(f"Clôture du {_date_fr(expected)} pas encore publiée par yfinance.")
+        lines += off_lines
+        if off_plan and off_total is not None:
+            plan_value = cash + sum(qty[s] * prices[s] for s in sleeves)
+            lines.append(f"Valeur totale du PEA : {fmt_eur(plan_value + off_total)}.")
         weights_and_cash = _weights_and_cash_lines(config, params, qty, prices, cash)
     else:
         lines.append("Cours des poches indisponibles : valeur et poids non calculés.")
+        lines += off_lines
         weights_and_cash = [f"Cash non investi : {fmt_eur(cash)}."]
     lines += weights_and_cash[:-1]
     lines += _orders_lines(state, calendar, today, trading_today)

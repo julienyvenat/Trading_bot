@@ -517,7 +517,7 @@ le stop. Pas d'ordre Duo/Trio : ces stratégies n'ont pas d'objectif de gain.
 
 #### PEA cœur-satellite : plan passif 55 / 20 / 25, sans signal ni stop
 
-> **Config réellement utilisée : `config/config_pea_fortuneo_80_20.yaml`** — même moteur, mais **80 % DCAM / 20 % PSP5, sans levier** (décision du 2026-09-25 : la poche CL2 n'ajoute qu'environ +0,3 pt/an sur 1990→2026 pour ~10 pts de drawdown en plus, cf. tableaux ci-dessous). Compte manuel : `state/manual_account_fortuneo.json` (cash seul, AXA détenues à côté non gérées). La variante 55/20/25 reste documentée ci-dessous et dans `config_pea_core_satellite.example.yaml`.
+> **Config réellement utilisée : `config/config_pea_fortuneo_80_20.yaml`** — même moteur, mais **80 % DCAM / 20 % PSP5, sans levier** (décision du 2026-09-25 : la poche CL2 n'ajoute qu'environ +0,3 pt/an sur 1990→2026 pour ~10 pts de drawdown en plus, cf. tableaux ci-dessous). Compte manuel : `state/manual_account_fortuneo.json` (cash + les 24 AXA détenues à côté, `CS.PA`, présentes pour refléter le PEA réel mais **hors plan** : jamais achetées, vendues ni rééquilibrées, ni comptées dans les poids, la dérive, les apports ou le drawdown). La variante 55/20/25 reste documentée ci-dessous et dans `config_pea_core_satellite.example.yaml`.
 
 Config : `config/config_pea_core_satellite.example.yaml` (stratégie
 `core_satellite`, logique dans `trading_bot.portfolio.core_satellite`,
@@ -733,11 +733,15 @@ live:
     priority: -1
     catch_up_until: "12:00"   # bot redémarré après 08:30 sans aperçu : envoyé jusqu'à midi
     # title: "…"              # défaut : titre des notifications + « — aperçu du matin »
+    labels: {CS.PA: AXA}      # nom court des positions hors plan (défaut : ticker sans ".PA")
 ```
 
 Contenu (< 1 024 caractères) : valeur à la dernière clôture et variation sur
-la veille / le mois / l'année (à positions actuelles, cash compris) ; poids
-contre cibles et dérive max contre le seuil de 5 pts ; **rappel des ordres
+la veille / le mois / l'année (à positions actuelles, cash compris) ; une
+ligne par position hors plan du fichier de compte (valeur à la dernière
+clôture valide, plus-value contre le PRU, variation sur la veille ; « cours
+indisponible » sinon) puis la **valeur totale du PEA** (plan + hors plan) ;
+poids **du plan** contre cibles et dérive max contre le seuil de 5 pts ; **rappel des ordres
 poussés la veille au soir** (mémorisés dans `state.last_cycle_orders`) ou
 « Aucun ordre à passer aujourd'hui. » ; cash non investi et seuil d'apport ;
 alerte de drawdown active le cas échéant ; une ligne de marché (S&P 500,
@@ -752,15 +756,17 @@ python -m trading_bot morning-brief --config config/config_pea_fortuneo_80_20.ya
 ```
 
 Exemple réel (`--print` le 25/09/2026 à 7h, 292 DCAM + 7 PSP5 + 56,41 € de
-cash, un ordre fictif mémorisé la veille ; yfinance n'avait pas encore
+cash + 24 AXA hors plan, un ordre fictif mémorisé la veille ; yfinance n'avait pas encore
 publié la clôture du 24/09, d'où la ligne « pas encore publiée ») :
 
 ```
 PEA Fortuneo 80/20 — aperçu du matin
-Valeur à la clôture du 23/09 : 2 302,56 € (-3,63 €, -0,2 % sur la veille).
+Valeur du plan à la clôture du 23/09 : 2 302,56 € (-3,63 €, -0,2 % sur la veille).
 Perf. à positions actuelles : sept. +1,9 % · 2026 +15,2 %.
 Clôture du 24/09 pas encore publiée par yfinance.
-Poids : DCAM 79,4 % (cible 80,0 %) · PSP5 18,1 % (cible 20,0 %). Dérive max 1,9 pts (seuil 5) : dans la bande.
+Hors plan : 24 AXA (CS.PA) ≈ 1 037,04 € (+113,5 % vs PRU 20,24 €, -1,6 % veille).
+Valeur totale du PEA : 3 339,60 €.
+Poids du plan : DCAM 79,4 % (cible 80,0 %) · PSP5 18,1 % (cible 20,0 %). Dérive max 1,9 pts (seuil 5) : dans la bande.
 Ordres à passer aujourd'hui (cycle du 24/09) :
 - ACHETER 2 PSP5 — ordre au marché (ou à cours limité 59,88 €)
 Cash non investi : 56,41 € — sous le seuil d'apport (200,00 €) : il attend le prochain versement.
